@@ -1,0 +1,2896 @@
+#!/usr/bin/env python3
+"""Fetch Intercom conversations, send teammate replies, and close threads."""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import html
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+INTERCOM_VERSION = "2.14"
+UNSTABLE_VERSION = "Unstable"
+DEFAULT_LIMIT = 20
+RECENT_INBOX_SECONDS = 30 * 24 * 60 * 60
+SYNC_PAGE_SIZE = 150
+MAX_SYNC_PAGES = 500
+SEARCH_LIMIT = 50
+SNIPPET_LIMIT = 240
+TIMEOUT_SEC = 15
+LOGIN_TIMEOUT_SEC = 150
+OAUTH_PORT = 18741
+OAUTH_REDIRECT = f"http://localhost:{OAUTH_PORT}/callback"
+DETAIL_WORKERS = 8
+NOTE_PART_TYPES = {"note", "note_and_reopen"}
+PUBLIC_PART_TYPES = {"comment", "open", "close"}
+ASSIGN_PART_TYPES = {"assignment", "assign_and_reopen", "assign_and_unsnooze"}
+MESSAGE_PART_TYPES = NOTE_PART_TYPES | PUBLIC_PART_TYPES | ASSIGN_PART_TYPES
+
+REGION_HOSTS = {
+    "US": ("https://api.intercom.io", "https://app.intercom.com"),
+    "EU": ("https://api.eu.intercom.io", "https://app.eu.intercom.com"),
+    "AU": ("https://api.au.intercom.io", "https://app.au.intercom.com"),
+}
+
+HTML_TAG = re.compile(r"<[^>]+>", re.S)
+HTML_MARKUP = re.compile(r"</?[A-Za-z][^>]*>", re.S)
+WHITESPACE = re.compile(r"\s+")
+BARE_URL = re.compile(r"https?://[^\s<>\"']+", re.I)
+TRAILING_URL_PUNCT = re.compile(r"[.,;:!?]+$")
+WORKSPACE_IN_URL = re.compile(r"/a/(?:inbox|apps)/([^/]+)/", re.I)
+WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$")
+CONVERSATION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+RESERVED_WORKSPACE = {
+    "inbox",
+    "apps",
+    "shared",
+    "all",
+    "conversation",
+    "conversations",
+    "admin",
+    "home",
+}
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, body: str, url: str = "") -> None:
+        self.status = status
+        self.body = body
+        self.url = url
+        super().__init__(summarize_error(status, body))
+
+
+def default_token_path() -> str:
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    return os.path.join(config_home, "omarchy", "intercom-notifier", "token")
+
+
+def plugin_token_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "token")
+
+
+def token_paths(token_file: str | None) -> list[str]:
+    paths: list[str] = []
+    if token_file:
+        paths.append(os.path.expanduser(token_file))
+    for candidate in (default_token_path(), plugin_token_path()):
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def read_token(token_file: str | None) -> str | None:
+    env_token = os.environ.get("INTERCOM_ACCESS_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    for path in token_paths(token_file):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError:
+            continue
+        if token:
+            return token
+    return None
+
+
+def api_base_for_region(region: str) -> str:
+    return REGION_HOSTS.get((region or "US").upper(), REGION_HOSTS["US"])[0]
+
+
+def inbox_host_for_region(region: str) -> str:
+    return REGION_HOSTS.get((region or "US").upper(), REGION_HOSTS["US"])[1]
+
+
+def parse_workspace_id(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = WORKSPACE_IN_URL.search(text)
+    if match:
+        text = match.group(1).strip()
+    if "/" in text or text.lower() in RESERVED_WORKSPACE:
+        return ""
+    if not WORKSPACE_ID.fullmatch(text):
+        return ""
+    return text
+
+
+def workspace_from_payload(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list):
+        conversations = [payload]
+    for item in conversations:
+        if not isinstance(item, dict):
+            continue
+        company = item.get("company") if isinstance(item.get("company"), dict) else {}
+        workspace = parse_workspace_id(company.get("app_id"))
+        if workspace:
+            return workspace
+    return ""
+
+
+def inbox_url(region: str, workspace_id: str) -> str:
+    workspace = parse_workspace_id(workspace_id)
+    host = inbox_host_for_region(region)
+    if not workspace:
+        return host
+    return f"{host}/a/inbox/{workspace}/inbox/shared/all"
+
+
+def conversation_url(region: str, workspace_id: str, conversation_id: str) -> str:
+    conv_id = str(conversation_id or "").strip()
+    workspace = parse_workspace_id(workspace_id)
+    if not conv_id:
+        return inbox_url(region, workspace)
+    if not workspace:
+        return ""
+    return (
+        f"{inbox_host_for_region(region)}/a/inbox/{workspace}"
+        f"/inbox/shared/all/conversation/{conv_id}"
+    )
+
+
+def strip_html(value: object) -> str:
+    text = HTML_TAG.sub(" ", str(value or ""))
+    text = html.unescape(text)
+    return WHITESPACE.sub(" ", text).strip()
+
+
+def is_safe_http_url(value: object) -> str:
+    text = html.unescape(str(value or "")).strip()
+    if not text or any(ch.isspace() for ch in text):
+        return ""
+    lower = text.lower()
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        return ""
+    if lower.startswith("javascript:") or lower.startswith("data:"):
+        return ""
+    return text
+
+
+def trim_url_match(value: str) -> str:
+    url = str(value or "")
+    while url:
+        safe = is_safe_http_url(url)
+        if safe:
+            return safe
+        trimmed = TRAILING_URL_PUNCT.sub("", url)
+        if trimmed != url:
+            url = trimmed
+            continue
+        if url[-1] in ")]}>'\"":
+            url = url[:-1]
+            continue
+        break
+    return is_safe_http_url(url)
+
+
+def message_plain_text(value: object) -> str:
+    text = HTML_TAG.sub(" ", str(value or ""))
+    text = html.unescape(text).replace("\xa0", " ")
+    return WHITESPACE.sub(" ", text).strip()
+
+
+def _linkify_plain(text: str) -> str:
+    parts: list[str] = []
+    last = 0
+    for match in BARE_URL.finditer(text):
+        url = trim_url_match(match.group(0))
+        if not url:
+            continue
+        start = match.start()
+        end = start + len(url)
+        if start < last:
+            continue
+        parts.append(html.escape(text[last:start]).replace("\n", "<br>"))
+        parts.append(f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a>')
+        last = end
+    parts.append(html.escape(text[last:]).replace("\n", "<br>"))
+    return "".join(parts)
+
+
+class MessageFormatter(HTMLParser):
+    BLOCK_TAGS = {
+        "p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6",
+        "blockquote", "tr", "table", "pre", "hr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.bold = 0
+        self.italic = 0
+        self.link_stack: list[bool] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "br":
+            self.parts.append("\n")
+            return
+        if tag in self.BLOCK_TAGS:
+            self._block_break()
+            return
+        if tag in ("b", "strong"):
+            self.bold += 1
+            if self.bold == 1:
+                self.parts.append("<b>")
+            return
+        if tag in ("i", "em"):
+            self.italic += 1
+            if self.italic == 1:
+                self.parts.append("<i>")
+            return
+        if tag == "a":
+            href = ""
+            for name, value in attrs:
+                if name.lower() == "href":
+                    href = is_safe_http_url(value)
+                    break
+            opened = bool(href) and not any(self.link_stack)
+            if opened:
+                self.parts.append(f'<a href="{html.escape(href, quote=True)}">')
+            self.link_stack.append(opened)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre"):
+            self._paragraph_break()
+            return
+        if tag == "li":
+            self._block_break()
+            return
+        if tag in ("b", "strong"):
+            if self.bold <= 0:
+                return
+            self.bold -= 1
+            if self.bold == 0:
+                self.parts.append("</b>")
+            return
+        if tag in ("i", "em"):
+            if self.italic <= 0:
+                return
+            self.italic -= 1
+            if self.italic == 0:
+                self.parts.append("</i>")
+            return
+        if tag == "a":
+            if not self.link_stack:
+                return
+            if self.link_stack.pop():
+                self.parts.append("</a>")
+
+    def handle_data(self, data: str) -> None:
+        text = WHITESPACE.sub(" ", str(data or "").replace("\xa0", " "))
+        if text == "":
+            return
+        if text.strip() == "":
+            if self.parts and self.parts[-1] not in (" ", "\n"):
+                self.parts.append(" ")
+            return
+        if any(self.link_stack):
+            self.parts.append(html.escape(text))
+        else:
+            self.parts.append(_linkify_plain(text))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() != "br":
+            self.handle_endtag(tag)
+
+    def _block_break(self) -> None:
+        while self.parts and self.parts[-1] == " ":
+            self.parts.pop()
+        if not "".join(self.parts).strip():
+            return
+        if self.parts and self.parts[-1] != "\n":
+            self.parts.append("\n")
+
+    def _paragraph_break(self) -> None:
+        self._block_break()
+        if not self.parts or self.parts[-1] != "\n":
+            return
+        if len(self.parts) < 2 or self.parts[-2] != "\n":
+            self.parts.append("\n")
+
+    def styled(self) -> str:
+        while self.italic > 0:
+            self.parts.append("</i>")
+            self.italic -= 1
+        while self.bold > 0:
+            self.parts.append("</b>")
+            self.bold -= 1
+        while self.link_stack:
+            if self.link_stack.pop():
+                self.parts.append("</a>")
+        text = "".join(self.parts)
+        text = re.sub(r"\n{2,}", "\n\n", text).strip("\n")
+        return text.replace("\n", "<br>")
+
+
+def format_message_body(value: object) -> str:
+    text = str(value or "")
+    if not text.strip():
+        return ""
+    if HTML_MARKUP.search(text):
+        formatter = MessageFormatter()
+        formatter.feed(text)
+        formatter.close()
+        styled = formatter.styled()
+    else:
+        styled = _linkify_plain(text.replace("\r\n", "\n").replace("\r", "\n"))
+    if not message_plain_text(styled):
+        return ""
+    return styled
+
+
+def truncate(value: str, limit: int = SNIPPET_LIMIT) -> str:
+    text = WHITESPACE.sub(" ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def search_body(limit: int) -> dict:
+    per_page = max(1, min(150, int(limit)))
+    return {
+        "query": {
+            "operator": "AND",
+            "value": [
+                {"field": "open", "operator": "=", "value": True},
+                {"field": "state", "operator": "=", "value": "open"},
+                {"field": "waiting_since", "operator": ">", "value": 0},
+            ],
+        },
+        "pagination": {"per_page": per_page},
+        "sort": {"field": "waiting_since", "order": "descending"},
+    }
+
+
+def search_open_body(limit: int) -> dict:
+    per_page = max(1, min(150, int(limit)))
+    return {
+        "query": {
+            "operator": "AND",
+            "value": [
+                {"field": "open", "operator": "=", "value": True},
+                {"field": "state", "operator": "=", "value": "open"},
+            ],
+        },
+        "pagination": {"per_page": per_page},
+        "sort": {"field": "updated_at", "order": "descending"},
+    }
+
+
+def search_state_body(state: str, limit: int, now: float | None = None) -> dict:
+    per_page = max(1, min(150, int(limit)))
+    wanted = str(state or "").strip().lower()
+    clauses: list[dict[str, object]] = [
+        {"field": "state", "operator": "=", "value": wanted},
+    ]
+    if wanted in ("closed", "snoozed") and per_page > 1:
+        since = int((time.time() if now is None else now) - RECENT_INBOX_SECONDS)
+        clauses.append({"field": "updated_at", "operator": ">", "value": max(0, since)})
+    return {
+        "query": {
+            "operator": "AND",
+            "value": clauses,
+        },
+        "pagination": {"per_page": per_page},
+        "sort": {"field": "updated_at", "order": "descending"},
+    }
+
+
+def search_inbox_body(inbox_filter: str, limit: int) -> dict:
+    mode = filter_mode(inbox_filter)
+    if mode == "waiting":
+        return search_body(limit)
+    if mode == "closed":
+        return search_state_body("closed", limit)
+    if mode == "snoozed":
+        return search_state_body("snoozed", limit)
+    if mode == "all":
+        return search_all_body(limit)
+    return search_open_body(limit)
+
+
+def search_all_body(limit: int = 150, starting_after: str = "") -> dict:
+    per_page = max(1, min(150, int(limit)))
+    pagination: dict[str, object] = {"per_page": per_page}
+    cursor = str(starting_after or "").strip()
+    if cursor:
+        pagination["starting_after"] = cursor
+    return {
+        "query": {
+            "operator": "OR",
+            "value": [
+                {"field": "state", "operator": "=", "value": "open"},
+                {"field": "state", "operator": "=", "value": "closed"},
+                {"field": "state", "operator": "=", "value": "snoozed"},
+            ],
+        },
+        "pagination": pagination,
+        "sort": {"field": "updated_at", "order": "descending"},
+    }
+
+
+def search_tokens(value: object) -> list[str]:
+    return [part.lower() for part in WHITESPACE.split(str(value or "").strip().lower()) if part]
+
+
+def search_remote_body(text: str, limit: int = SEARCH_LIMIT) -> dict:
+    query = str(text or "").strip()
+    words = search_tokens(query)[:6]
+    clauses: list[dict[str, object]] = [
+        {"field": "source.author.name", "operator": "~", "value": query},
+        {"field": "source.author.email", "operator": "~", "value": query},
+        {"field": "source.subject", "operator": "~", "value": query},
+    ]
+    if len(words) == 1:
+        clauses.append({"field": "source.body", "operator": "=", "value": words[0]})
+    elif words:
+        clauses.append({
+            "operator": "AND",
+            "value": [{"field": "source.body", "operator": "=", "value": word} for word in words],
+        })
+    return {
+        "query": {"operator": "OR", "value": clauses},
+        "pagination": {"per_page": max(1, min(SEARCH_LIMIT, int(limit)))},
+        "sort": {"field": "updated_at", "order": "descending"},
+    }
+
+
+def parse_me(payload: dict) -> dict:
+    app = payload.get("app") if isinstance(payload.get("app"), dict) else {}
+    region = str(app.get("region") or "US").upper()
+    if region not in REGION_HOSTS:
+        region = "US"
+    email = str(payload.get("email") or "").strip()
+    return {
+        "id": str(payload.get("id") or ""),
+        "name": str(payload.get("name") or ""),
+        "email": email if "@" in email else "",
+        "workspaceId": str(app.get("id_code") or ""),
+        "region": region,
+    }
+
+
+def identity_from_me(me: object) -> dict:
+    if not isinstance(me, dict):
+        return {}
+    fields: dict[str, object] = {}
+    admin_id = str(me.get("id") or "").strip()
+    name = str(me.get("name") or "").strip()
+    email = str(me.get("email") or "").strip()
+    if admin_id:
+        fields["adminId"] = admin_id
+    if name:
+        fields["adminName"] = name
+    if email:
+        fields["adminEmail"] = email
+    return fields
+
+
+def persist_admin(me: dict | None) -> None:
+    if not isinstance(me, dict) or not me.get("id"):
+        return
+    fields: dict[str, object] = {
+        "adminId": str(me.get("id") or ""),
+        "adminName": str(me.get("name") or ""),
+        "adminEmail": str(me.get("email") or ""),
+    }
+    if me.get("region"):
+        fields["region"] = me["region"]
+    workspace = parse_workspace_id(me.get("workspaceId"))
+    if workspace:
+        fields["workspaceId"] = workspace
+    try:
+        save_config(**fields)
+    except OSError:
+        pass
+
+
+def identity_fields() -> dict:
+    config = load_config()
+    return {
+        "adminId": str(config.get("adminId") or ""),
+        "adminName": str(config.get("adminName") or ""),
+        "adminEmail": str(config.get("adminEmail") or ""),
+    }
+
+
+def is_word_char(value: str) -> bool:
+    if not value:
+        return False
+    return ("0" <= value <= "9") or ("A" <= value <= "Z") or ("a" <= value <= "z")
+
+
+def _is_code_fence(line: str) -> bool:
+    return line.lstrip().startswith("```")
+
+
+def _preformatted(lines: list[str]) -> str:
+    return f"<pre><code>{html.escape('\n'.join(lines))}</code></pre>"
+
+
+def markdown_to_html(value: object) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return ""
+    chunks: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
+
+    def append_piece(piece: str) -> None:
+        if chunks:
+            chunks.append("<br>")
+        chunks.append(piece)
+
+    for line in text.split("\n"):
+        if _is_code_fence(line):
+            if in_code:
+                append_piece(_preformatted(code_lines))
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        append_piece(_markdown_inline(line))
+    if in_code:
+        append_piece(_preformatted(code_lines))
+    styled = "".join(chunks)
+    if not message_plain_text(styled):
+        return ""
+    return styled
+
+
+def _markdown_inline(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        if text[i] == "`":
+            end = text.find("`", i + 1)
+            if end != -1:
+                out.append(f"<code>{html.escape(text[i + 1 : end])}</code>")
+                i = end + 1
+                continue
+        if text.startswith("**", i) or text.startswith("__", i):
+            mark = text[i : i + 2]
+            end = text.find(mark, i + 2)
+            if end != -1:
+                out.append(f"<b>{html.escape(text[i + 2 : end])}</b>")
+                i = end + 2
+                continue
+        if text[i] == "*" and not text.startswith("**", i):
+            end = text.find("*", i + 1)
+            if end > i + 1:
+                out.append(f"<i>{html.escape(text[i + 1 : end])}</i>")
+                i = end + 1
+                continue
+        if text[i] == "_" and not text.startswith("__", i) and (i == 0 or not is_word_char(text[i - 1])):
+            end = text.find("_", i + 1)
+            if end > i + 1 and (end + 1 >= length or not is_word_char(text[end + 1])):
+                out.append(f"<i>{html.escape(text[i + 1 : end])}</i>")
+                i = end + 1
+                continue
+        if text[i] == "[":
+            close = text.find("](", i + 1)
+            finish = text.find(")", close + 2) if close != -1 else -1
+            if close != -1 and finish > close:
+                label = text[i + 1 : close]
+                href = is_safe_http_url(text[close + 2 : finish].strip())
+                if href:
+                    out.append(
+                        f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>'
+                    )
+                    i = finish + 1
+                    continue
+        out.append(html.escape(text[i]))
+        i += 1
+    return "".join(out)
+
+
+def admin_reply_body(admin_id: str, body: str, message_type: str = "comment") -> dict:
+    kind = "note" if str(message_type or "").strip().lower() == "note" else "comment"
+    return {
+        "message_type": kind,
+        "type": "admin",
+        "admin_id": str(admin_id),
+        "body": body,
+    }
+
+
+def admin_part_body(admin_id: str, message_type: str) -> dict:
+    kind = "open" if str(message_type or "").strip().lower() == "open" else "close"
+    return {
+        "message_type": kind,
+        "type": "admin",
+        "admin_id": str(admin_id),
+    }
+
+
+def admin_close_body(admin_id: str) -> dict:
+    return admin_part_body(admin_id, "close")
+
+
+def admin_open_body(admin_id: str) -> dict:
+    return admin_part_body(admin_id, "open")
+
+
+def conversation_title(conv: dict) -> str:
+    title = str(conv.get("title") or "").strip()
+    if title:
+        return title
+    source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
+    subject = str(source.get("subject") or "").strip()
+    if subject:
+        return subject
+    author = source.get("author") if isinstance(source.get("author"), dict) else {}
+    name = str(author.get("name") or "").strip()
+    if name:
+        return name
+    contacts = conv.get("contacts") if isinstance(conv.get("contacts"), dict) else {}
+    people = contacts.get("contacts") if isinstance(contacts.get("contacts"), list) else []
+    if people and isinstance(people[0], dict):
+        name = str(people[0].get("name") or "").strip()
+        if name:
+            return name
+    conv_id = str(conv.get("id") or "").strip()
+    return f"Conversation {conv_id}" if conv_id else "Conversation"
+
+
+def unix_time(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def author_email(author: object) -> str:
+    if not isinstance(author, dict):
+        return ""
+    email = str(author.get("email") or "").strip()
+    return email if "@" in email else ""
+
+
+def author_name(author: object) -> str:
+    if not isinstance(author, dict):
+        return ""
+    name = str(author.get("name") or "").strip()
+    email = author_email(author)
+    if not name:
+        return ""
+    if email and name.lower() == email.lower():
+        return ""
+    return name
+
+
+def author_fallback(author: object) -> str:
+    if not isinstance(author, dict):
+        return ""
+    kind = str(author.get("type") or "").strip().lower()
+    if kind in ("admin", "team"):
+        return "Teammate"
+    if kind in ("bot", "operator", "ai_agent"):
+        return "Bot"
+    if kind in ("user", "lead", "visitor", "contact"):
+        return "Customer"
+    return kind.capitalize() if kind else ""
+
+
+def author_label(author: object) -> str:
+    name = author_name(author)
+    if name:
+        return name
+    email = author_email(author)
+    if email:
+        return email
+    return author_fallback(author)
+
+
+def author_email_for_display(author: object) -> str:
+    email = author_email(author)
+    if not email or author_label(author) == email:
+        return ""
+    return email
+
+
+def conversation_parts_list(conv: dict) -> list[dict]:
+    parts = conv.get("conversation_parts")
+    if isinstance(parts, dict):
+        items = parts.get("conversation_parts")
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    if isinstance(parts, list):
+        return [item for item in parts if isinstance(item, dict)]
+    return []
+
+
+def conversation_parts_total(conv: dict) -> int:
+    parts = conv.get("conversation_parts")
+    if not isinstance(parts, dict):
+        return 0
+    try:
+        return max(0, int(parts.get("total_count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parts_next_cursor(conv: dict) -> str:
+    parts = conv.get("conversation_parts")
+    if not isinstance(parts, dict):
+        return ""
+    pages = parts.get("pages") if isinstance(parts.get("pages"), dict) else {}
+    nxt = pages.get("next")
+    if isinstance(nxt, dict):
+        return str(nxt.get("starting_after") or nxt.get("starting_after_id") or "").strip()
+    if isinstance(nxt, str):
+        return nxt.strip()
+    return str(pages.get("next") or "").strip()
+
+
+def search_next_cursor(payload: dict) -> str:
+    pages = payload.get("pages") if isinstance(payload.get("pages"), dict) else {}
+    nxt = pages.get("next")
+    if isinstance(nxt, dict):
+        return str(nxt.get("starting_after") or nxt.get("starting_after_id") or "").strip()
+    if isinstance(nxt, str):
+        return nxt.strip()
+    return str(pages.get("next") or "").strip()
+
+
+def author_type(author: object) -> str:
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("type") or "").strip().lower()
+
+
+def is_bot_author(author: object) -> bool:
+    return author_type(author) in ("bot", "operator", "ai_agent")
+
+
+def is_message_part(part_type: str, author: object, public_only: bool = False) -> bool:
+    kind = str(part_type or "").strip().lower()
+    if kind not in MESSAGE_PART_TYPES:
+        return False
+    if kind in NOTE_PART_TYPES:
+        return not public_only
+    if kind in ASSIGN_PART_TYPES:
+        # Intercom types a teammate reply that also assigns/reopens as assignment,
+        # not comment. Bot-only assignment events ("Assigned to inbox") stay hidden.
+        return not is_bot_author(author)
+    return True
+
+
+def message_kind(part_type: str, author: object) -> str:
+    if str(part_type or "").strip().lower() in NOTE_PART_TYPES:
+        return "note"
+    if not isinstance(author, dict):
+        return "customer"
+    kind = author_type(author)
+    if kind in ("admin", "team"):
+        return "teammate"
+    if kind in ("bot", "operator", "ai_agent"):
+        return "bot"
+    return "customer"
+
+
+def extract_messages(conv: dict) -> list[dict]:
+    messages: list[dict] = []
+    seen: set[str] = set()
+
+    def add(message_id: str, author: object, part_type: str, created: int, body: str) -> None:
+        text = format_message_body(body)
+        if not text:
+            return
+        key = str(message_id or "").strip() or f"{created}:{text[:80]}"
+        if key in seen:
+            return
+        seen.add(key)
+        messages.append({
+            "id": key,
+            "from": author_label(author),
+            "email": author_email_for_display(author),
+            "kind": message_kind(part_type, author),
+            "createdAt": max(0, int(created or 0)),
+            "body": text,
+        })
+
+    source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
+    source_body = source.get("body") or ""
+    if source_body:
+        created = unix_time(source.get("created_at")) or unix_time(conv.get("created_at"))
+        add(str(source.get("id") or "source"), source.get("author"), "", created, source_body)
+    for part in conversation_parts_list(conv):
+        part_type = str(part.get("part_type") or "").strip().lower()
+        author = part.get("author")
+        if not is_message_part(part_type, author):
+            continue
+        created = unix_time(part.get("created_at"))
+        add(str(part.get("id") or ""), author, part_type, created, part.get("body") or "")
+    messages.sort(key=lambda item: (item.get("createdAt") or 0, item.get("id") or ""))
+    return messages
+
+
+def latest_public_message(conv: dict) -> tuple[object, str]:
+    messages: list[tuple[int, object, str]] = []
+    source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
+    source_body = strip_html(source.get("body") or "")
+    if source_body:
+        created = unix_time(source.get("created_at")) or unix_time(conv.get("created_at"))
+        messages.append((created, source.get("author"), source_body))
+    for part in conversation_parts_list(conv):
+        author = part.get("author")
+        if not is_message_part(part.get("part_type"), author, public_only=True):
+            continue
+        body = strip_html(part.get("body") or "")
+        if not body:
+            continue
+        messages.append((unix_time(part.get("created_at")), author, body))
+    if not messages:
+        return None, ""
+    messages.sort(key=lambda item: (item[0], item[2]))
+    _created, author, body = messages[-1]
+    return author, body
+
+
+def latest_preview(conv: dict) -> tuple[str, str]:
+    author, body = latest_public_message(conv)
+    if not body:
+        return "", ""
+    return author_label(author), truncate(body)
+
+
+def conversation_identity(conv: dict) -> tuple[str, str, str]:
+    author, body = latest_public_message(conv)
+    if not body:
+        source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
+        author = source.get("author")
+        body = ""
+    return author_label(author), author_email_for_display(author), truncate(body) if body else ""
+
+
+def conversation_snippet(conv: dict) -> str:
+    return latest_preview(conv)[1]
+
+
+def is_snoozed(conv: dict, now: int | None = None) -> bool:
+    if str(conv.get("state") or "").strip().lower() == "snoozed":
+        return True
+    until = unix_time(conv.get("snoozed_until"))
+    if until <= 0:
+        return False
+    if now is None:
+        now = int(time.time())
+    return until > now
+
+
+def waiting_since_of(conv: dict) -> int:
+    try:
+        value = int(conv.get("waiting_since") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def normalize_conversation(conv: dict, region: str, workspace_id: str) -> dict | None:
+    conv_id = str(conv.get("id") or "").strip()
+    waiting_since = waiting_since_of(conv)
+    if not conv_id or waiting_since <= 0 or is_snoozed(conv):
+        return None
+    sender, email, snippet = conversation_identity(conv)
+    return {
+        "id": conv_id,
+        "title": conversation_title(conv),
+        "from": sender,
+        "email": email,
+        "snippet": snippet,
+        "url": conversation_url(region, workspace_id, conv_id),
+        "waitingSince": waiting_since,
+        "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
+        "messages": extract_messages(conv),
+    }
+
+
+def normalize_open_conversation(conv: dict, region: str, workspace_id: str) -> dict | None:
+    conv_id = str(conv.get("id") or "").strip()
+    if not conv_id or is_snoozed(conv):
+        return None
+    sender, email, snippet = conversation_identity(conv)
+    return {
+        "id": conv_id,
+        "title": conversation_title(conv),
+        "from": sender,
+        "email": email,
+        "snippet": snippet,
+        "url": conversation_url(region, workspace_id, conv_id),
+        "waitingSince": waiting_since_of(conv),
+        "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
+    }
+
+
+def normalize_search_conversation(conv: dict, region: str, workspace_id: str) -> dict | None:
+    conv_id = str(conv.get("id") or "").strip()
+    if not conv_id:
+        return None
+    sender, email, snippet = conversation_identity(conv)
+    return {
+        "id": conv_id,
+        "title": conversation_title(conv),
+        "from": sender,
+        "email": email,
+        "snippet": snippet,
+        "url": conversation_url(region, workspace_id, conv_id),
+        "waitingSince": waiting_since_of(conv),
+        "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
+        "state": conversation_state(conv),
+    }
+
+
+def normalize_thread(conv: dict, region: str, workspace_id: str) -> dict:
+    conv_id = str(conv.get("id") or "").strip()
+    return {
+        "id": conv_id,
+        "title": conversation_title(conv),
+        "url": conversation_url(region, workspace_id, conv_id),
+        "waitingSince": waiting_since_of(conv),
+        "state": conversation_state(conv),
+        "messages": extract_messages(conv),
+    }
+
+
+def conversation_state(conv: dict) -> str:
+    state = str(conv.get("state") or "").strip().lower()
+    if state in ("open", "closed", "snoozed"):
+        return state
+    if is_snoozed(conv):
+        return "snoozed"
+    if conv.get("open") is False:
+        return "closed"
+    return "open"
+
+
+def should_fetch_archive_thread(state: object, stored: bool) -> bool:
+    return not (stored and str(state or "").strip().lower() == "closed")
+
+
+def archive_thread_record(conv: dict, region: str, workspace_id: str) -> dict:
+    thread = normalize_thread(conv, region, workspace_id)
+    sender, email, snippet = conversation_identity(conv)
+    thread["from"] = sender
+    thread["email"] = email
+    thread["snippet"] = snippet
+    thread["state"] = conversation_state(conv)
+    thread["updatedAt"] = unix_time(conv.get("updatedAt") or conv.get("updated_at")) or unix_time(
+        conv.get("created_at")
+    )
+    return thread
+
+
+def archive_index_row(record: dict) -> dict:
+    try:
+        waiting = int(record.get("waitingSince") if record.get("waitingSince") is not None else record.get("waiting_since") or 0)
+    except (TypeError, ValueError):
+        waiting = 0
+    return {
+        "id": str(record.get("id") or ""),
+        "title": str(record.get("title") or ""),
+        "from": str(record.get("from") or ""),
+        "email": str(record.get("email") or ""),
+        "snippet": str(record.get("snippet") or ""),
+        "state": str(record.get("state") or conversation_state(record)),
+        "updatedAt": unix_time(record.get("updatedAt") or record.get("updated_at")),
+        "waitingSince": max(0, waiting),
+        "url": str(record.get("url") or ""),
+    }
+
+
+def sort_waiting(conversations: list[dict]) -> list[dict]:
+    return sorted(conversations, key=lambda row: (-(row.get("waitingSince") or 0), row.get("id") or ""))
+
+
+def sort_open(conversations: list[dict]) -> list[dict]:
+    return sorted(
+        conversations,
+        key=lambda row: (-(row.get("updatedAt") or 0), row.get("id") or ""),
+    )
+
+
+def parse_search(payload: dict, region: str, workspace_id: str, limit: int) -> dict:
+    raw = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
+    conversations = []
+    skipped_snoozed = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if is_snoozed(item) and waiting_since_of(item) > 0:
+            skipped_snoozed += 1
+        row = normalize_conversation(item, region, workspace_id)
+        if row:
+            conversations.append(row)
+    conversations = sort_waiting(conversations)[: max(0, int(limit))]
+    total = payload.get("total_count")
+    try:
+        waiting_count = int(total)
+    except (TypeError, ValueError):
+        waiting_count = len(conversations)
+    if skipped_snoozed:
+        waiting_count = max(0, waiting_count - skipped_snoozed)
+    if waiting_count < len(conversations):
+        waiting_count = len(conversations)
+    return {
+        "waitingCount": waiting_count,
+        "conversations": conversations,
+    }
+
+
+def parse_inbox_search(
+    payload: dict,
+    region: str,
+    workspace_id: str,
+    limit: int,
+    inbox_filter: str = "open",
+) -> dict:
+    mode = filter_mode(inbox_filter)
+    if mode == "waiting":
+        mode = "open"
+    raw = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
+    conversations = []
+    skipped = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        state = conversation_state(item)
+        if mode == "open" and state != "open":
+            skipped += 1
+            continue
+        if mode == "closed" and state != "closed":
+            continue
+        if mode == "snoozed" and state != "snoozed":
+            continue
+        row = normalize_search_conversation(item, region, workspace_id)
+        if row:
+            conversations.append(row)
+    conversations = sort_open(conversations)[: max(0, int(limit))]
+    total = payload.get("total_count")
+    try:
+        count = int(total)
+    except (TypeError, ValueError):
+        count = len(conversations)
+    if mode == "open" and skipped:
+        count = max(0, count - skipped)
+    if count < len(conversations):
+        count = len(conversations)
+    waiting_count = sum(1 for row in conversations if (row.get("waitingSince") or 0) > 0)
+    return {
+        "inboxCount": count,
+        "openCount": count if mode == "open" else 0,
+        "waitingCount": waiting_count,
+        "conversations": conversations,
+    }
+
+
+def parse_open_search(payload: dict, region: str, workspace_id: str, limit: int) -> dict:
+    parsed = parse_inbox_search(payload, region, workspace_id, limit, "open")
+    return {
+        "openCount": parsed["openCount"] or parsed["inboxCount"],
+        "waitingCount": parsed["waitingCount"],
+        "conversations": parsed["conversations"],
+    }
+
+
+def parse_search_results(payload: dict, region: str, workspace_id: str, limit: int) -> dict:
+    raw = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
+    conversations = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        row = normalize_search_conversation(item, region, workspace_id)
+        if row:
+            conversations.append(row)
+    conversations = sort_open(conversations)[: max(0, int(limit))]
+    total = payload.get("total_count")
+    try:
+        count = int(total)
+    except (TypeError, ValueError):
+        count = len(conversations)
+    return {
+        "openCount": count,
+        "waitingCount": sum(1 for row in conversations if (row.get("waitingSince") or 0) > 0),
+        "conversations": conversations,
+    }
+
+
+def error_fields(body: str) -> tuple[str, str]:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(parsed, dict):
+        return "", ""
+    errors = parsed.get("errors")
+    first = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+    return str(first.get("code") or ""), str(first.get("message") or "").strip()
+
+
+def is_wrong_region(error: ApiError) -> bool:
+    code, message = error_fields(error.body)
+    return error.status == 401 and code == "unauthorized" and "Access Token Invalid" in message
+
+
+def is_missing_permission(error: ApiError) -> bool:
+    code, message = error_fields(error.body)
+    return code == "token_unauthorized" or "Not authorized to access resource" in message
+
+
+def is_revoked_token(error: ApiError) -> bool:
+    return error.status == 401 and not is_missing_permission(error)
+
+
+def config_path() -> str:
+    return os.path.join(os.path.dirname(default_token_path()), "config.json")
+
+
+def normalize_panel_mode(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return "large" if text == "large" else "expanded"
+
+
+def load_config() -> dict:
+    try:
+        with open(config_path(), encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if "panel" in parsed:
+        parsed["panel"] = normalize_panel_mode(parsed.get("panel"))
+    return parsed
+
+
+def save_config(**fields: object) -> None:
+    data = load_config()
+    for key, value in fields.items():
+        if value is None:
+            continue
+        data[key] = value
+    path = config_path()
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+        handle.write("\n")
+    os.chmod(path, 0o600)
+
+
+def write_json_file(path: str, data: object) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o700)
+    tmp = f"{path}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def read_json_file(path: str) -> object:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def archive_dir() -> str:
+    return os.path.join(os.path.dirname(default_token_path()), "archive")
+
+
+def archive_index_path() -> str:
+    return os.path.join(archive_dir(), "index.json")
+
+
+def archive_status_path() -> str:
+    return os.path.join(archive_dir(), "status.json")
+
+
+def archive_thread_path(conversation_id: str) -> str:
+    return os.path.join(archive_dir(), "threads", f"{conversation_id}.json")
+
+
+def region_order(preferred: str | None = None) -> list[str]:
+    order: list[str] = []
+    if preferred:
+        region = str(preferred).upper()
+        if region in REGION_HOSTS:
+            order.append(region)
+    for region in ("US", "EU", "AU"):
+        if region not in order:
+            order.append(region)
+    return order
+
+
+def summarize_error(status: int, body: str) -> str:
+    code, message = error_fields(body)
+    if message:
+        if code == "token_unauthorized":
+            return (
+                "Token is missing a permission Intercom requires for this request. "
+                "Read conversations lists threads; Write conversations is required to reply or close."
+            )
+        return message
+    if status == 401:
+        return "Intercom rejected the access token."
+    if status == 403:
+        return "Intercom token is missing a required permission."
+    if status:
+        return f"Intercom request failed ({status})."
+    text = (body or "").strip()
+    if text:
+        return f"Intercom request failed: {text}"
+    return "Intercom request failed."
+
+
+def request_json(
+    url: str,
+    token: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    version: str | None = None,
+) -> dict:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/json")
+    req.add_header("Intercom-Version", version or INTERCOM_VERSION)
+    if payload is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise ApiError(error.code, body, url) from None
+    except urllib.error.URLError as error:
+        raise ApiError(0, str(error.reason or error), url) from None
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError as error:
+        raise ApiError(0, "Intercom returned invalid JSON.", url) from error
+    if not isinstance(parsed, dict):
+        raise ApiError(0, "Intercom returned invalid JSON.", url)
+    return parsed
+
+
+def request_form(url: str, payload: dict) -> dict:
+    data = urllib.parse.urlencode(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Accept", "application/json")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise ApiError(error.code, body, url) from None
+    except urllib.error.URLError as error:
+        raise ApiError(0, str(error.reason or error), url) from None
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError as error:
+        raise ApiError(0, "Intercom returned invalid JSON.", url) from error
+    if not isinstance(parsed, dict):
+        raise ApiError(0, "Intercom returned invalid JSON.", url)
+    return parsed
+
+
+def try_identify(token: str, region: str) -> dict | None:
+    try:
+        payload = request_json(f"{api_base_for_region(region)}/me", token)
+    except ApiError:
+        return None
+    me = parse_me(payload)
+    return me if me.get("id") else None
+
+
+def discover_workspace(token: str, region: str, conversation_ids: list[str] | None = None) -> str:
+    """Read workspace id_code from Unstable conversation payloads.
+
+    Stable conversation search omits company.app_id. Unstable includes it when a
+    company is attached. Listing stays on the stable API because Unstable totals
+    can differ.
+    """
+    base = api_base_for_region(region)
+    try:
+        payload = request_json(
+            f"{base}/conversations/search",
+            token,
+            method="POST",
+            payload=search_body(50),
+            version=UNSTABLE_VERSION,
+        )
+    except ApiError:
+        payload = None
+    workspace = workspace_from_payload(payload)
+    if workspace:
+        return workspace
+    for conv_id in (conversation_ids or [])[:8]:
+        if not conv_id:
+            continue
+        try:
+            one = request_json(
+                f"{base}/conversations/{conv_id}",
+                token,
+                version=UNSTABLE_VERSION,
+            )
+        except ApiError:
+            continue
+        workspace = workspace_from_payload(one)
+        if workspace:
+            return workspace
+    return ""
+
+
+def fetch_conversation_detail(token: str, region: str, conv_id: str) -> dict | None:
+    conv_id = str(conv_id or "").strip()
+    if not conv_id:
+        return None
+    try:
+        return request_json(
+            f"{api_base_for_region(region)}/conversations/{conv_id}?display_as=plaintext",
+            token,
+        )
+    except ApiError:
+        return None
+
+
+def merge_conversation_parts(conv: dict, extra_parts: list[dict]) -> dict:
+    existing = conversation_parts_list(conv)
+    seen = {str(part.get("id") or "") for part in existing if str(part.get("id") or "")}
+    merged = list(existing)
+    for part in extra_parts:
+        if not isinstance(part, dict):
+            continue
+        part_id = str(part.get("id") or "")
+        if part_id and part_id in seen:
+            continue
+        if part_id:
+            seen.add(part_id)
+        merged.append(part)
+    row = dict(conv)
+    parts = row.get("conversation_parts")
+    if isinstance(parts, dict):
+        parts = dict(parts)
+        parts["conversation_parts"] = merged
+        row["conversation_parts"] = parts
+    else:
+        row["conversation_parts"] = merged
+    return row
+
+
+def attach_missing_parts(token: str, region: str, conv_id: str, conv: dict) -> dict:
+    if not isinstance(conv, dict):
+        return conv
+    conv_id = str(conv_id or conv.get("id") or "").strip()
+    cursor = parts_next_cursor(conv)
+    total = conversation_parts_total(conv)
+    if not conv_id or (not cursor and (total <= 0 or total <= len(conversation_parts_list(conv)))):
+        return conv
+    base = api_base_for_region(region)
+    pages = 0
+    while cursor and pages < 10:
+        pages += 1
+        url = (
+            f"{base}/conversations/{urllib.parse.quote(conv_id, safe='')}"
+            f"?display_as=plaintext&starting_after={urllib.parse.quote(cursor)}"
+        )
+        try:
+            extra = request_json(url, token)
+        except ApiError:
+            break
+        more = conversation_parts_list(extra)
+        if not more:
+            break
+        conv = merge_conversation_parts(conv, more)
+        nxt = parts_next_cursor(extra)
+        if not nxt or nxt == cursor:
+            break
+        cursor = nxt
+        if total and len(conversation_parts_list(conv)) >= total:
+            break
+    return conv
+
+
+def attach_latest_messages(token: str, region: str, conversations: list[object]) -> list[object]:
+    wanted = [
+        item
+        for item in conversations
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+    if not wanted:
+        return conversations
+    details: dict[str, dict] = {}
+    workers = max(1, min(DETAIL_WORKERS, len(wanted)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(fetch_conversation_detail, token, region, str(item.get("id"))): str(item.get("id"))
+            for item in wanted
+        }
+        for future in concurrent.futures.as_completed(futures):
+            conv_id = futures[future]
+            try:
+                payload = future.result()
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                details[conv_id] = payload
+    merged: list[object] = []
+    for item in conversations:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        extra = details.get(str(item.get("id") or ""))
+        if not extra:
+            merged.append(item)
+            continue
+        row = dict(item)
+        if extra.get("source"):
+            row["source"] = extra["source"]
+        if extra.get("conversation_parts") is not None:
+            row["conversation_parts"] = extra["conversation_parts"]
+        if extra.get("title"):
+            row["title"] = extra["title"]
+        merged.append(row)
+    return merged
+
+
+def fetch_waiting(
+    token: str,
+    region: str,
+    workspace_id: str,
+    limit: int,
+    payload: dict | None = None,
+    me: dict | None = None,
+) -> dict:
+    if payload is None:
+        payload = request_json(
+            f"{api_base_for_region(region)}/conversations/search",
+            token,
+            method="POST",
+            payload=search_body(limit),
+        )
+    conversations = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
+    payload = dict(payload)
+    payload["conversations"] = attach_latest_messages(token, region, conversations)
+    parsed = parse_search(payload, region, workspace_id, limit)
+    try:
+        counts = fetch_inbox_counts(token, region)
+    except Exception:
+        counts = None
+    return result_payload(
+        "ready",
+        "",
+        waitingCount=parsed["waitingCount"],
+        inboxUrl=inbox_url(region, workspace_id),
+        workspaceId=workspace_id,
+        conversations=parsed["conversations"],
+        **inbox_count_fields(counts),
+        **identity_from_me(me),
+    )
+
+
+def search_total_count(payload: dict) -> int:
+    total = payload.get("total_count") if isinstance(payload, dict) else None
+    try:
+        count = int(total)
+    except (TypeError, ValueError):
+        rows = payload.get("conversations") if isinstance(payload, dict) else []
+        count = len(rows) if isinstance(rows, list) else 0
+    return max(0, count)
+
+
+def fetch_inbox_counts(token: str, region: str) -> dict[str, int] | None:
+    counts: dict[str, int] = {}
+    for mode in ("open", "closed", "snoozed"):
+        try:
+            payload = request_json(
+                f"{api_base_for_region(region)}/conversations/search",
+                token,
+                method="POST",
+                payload=search_inbox_body(mode, 1),
+            )
+        except ApiError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        counts[mode] = search_total_count(payload)
+    counts["all"] = counts["open"] + counts["closed"] + counts["snoozed"]
+    return counts
+
+
+def inbox_count_fields(counts: dict[str, int] | None) -> dict[str, int]:
+    if not counts:
+        return {}
+    fields: dict[str, int] = {}
+    if "open" in counts:
+        fields["openCount"] = counts["open"]
+    if "closed" in counts:
+        fields["closedCount"] = counts["closed"]
+    if "snoozed" in counts:
+        fields["snoozedCount"] = counts["snoozed"]
+    if "all" in counts:
+        fields["allCount"] = counts["all"]
+    return fields
+
+
+def panel_mode(value: object = None) -> str:
+    if value is None:
+        value = load_config().get("panel")
+    return normalize_panel_mode(value)
+
+
+INBOX_FILTERS = ("open", "waiting", "closed", "snoozed", "all")
+
+
+def filter_mode(value: object = None) -> str:
+    if value is None:
+        value = load_config().get("filter")
+    text = str(value or "").strip().lower()
+    return text if text in INBOX_FILTERS else "open"
+
+
+def viewed_conversation(value: object = None) -> str:
+    if value is None:
+        value = load_config().get("viewed")
+    text = str(value or "").strip()
+    return text if CONVERSATION_ID.fullmatch(text) else ""
+
+
+def result_payload(state: str, message: str = "", **fields: object) -> dict:
+    payload = {
+        "state": state,
+        "message": message,
+        "waitingCount": 0,
+        "inboxUrl": "",
+        "workspaceId": "",
+        "conversations": [],
+        "conversation": {},
+        "openCount": 0,
+        "panel": panel_mode(),
+        "filter": filter_mode(),
+        "viewed": viewed_conversation(),
+        **identity_fields(),
+    }
+    payload.update(fields)
+    return payload
+
+
+def save_token(token: str, token_file: str | None = None, workspace_id: str | None = None) -> dict:
+    value = WHITESPACE.sub("", str(token or "")).strip()
+    if not value:
+        return result_payload("error", "Paste an Intercom access token first.")
+    path = os.path.expanduser(token_file or default_token_path())
+    directory = os.path.dirname(path)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        os.chmod(directory, 0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+        os.chmod(path, 0o600)
+        if workspace_id is not None:
+            workspace = parse_workspace_id(workspace_id)
+            if str(workspace_id).strip() and not workspace:
+                return result_payload(
+                    "error",
+                    "Could not read a workspace ID. Paste the Intercom inbox URL from your browser.",
+                )
+            if workspace:
+                save_config(workspaceId=workspace)
+    except OSError as error:
+        return result_payload("error", f"Could not save token: {error.strerror or error}")
+    return result_payload("saved", f"Saved token to {path}")
+
+
+def save_panel(mode: str) -> dict:
+    return save_prefs(panel=mode)
+
+
+def save_prefs(panel: str = "", inbox_filter: str = "", viewed: str = "") -> dict:
+    fields: dict[str, object] = {}
+    if str(panel or "").strip():
+        fields["panel"] = panel_mode(panel)
+    if str(inbox_filter or "").strip():
+        fields["filter"] = filter_mode(inbox_filter)
+    viewed_id = viewed_conversation(viewed) if str(viewed or "").strip() else ""
+    if viewed_id:
+        fields["viewed"] = viewed_id
+    if not fields:
+        return result_payload("error", "Missing panel or filter.")
+    try:
+        save_config(**fields)
+    except OSError as error:
+        return result_payload("error", f"Could not save preferences: {error.strerror or error}")
+    return result_payload("saved", "Saved panel preferences", **fields)
+
+
+def unconfigured_payload(token_file: str | None) -> dict:
+    return result_payload(
+        "unconfigured",
+        "Sign in with Intercom to connect this plugin.",
+    )
+
+
+def revoked_token_payload() -> dict:
+    return result_payload(
+        "unconfigured",
+        "Intercom signed you out. Sign in with Intercom again.",
+    )
+
+
+def missing_permission_payload() -> dict:
+    return result_payload(
+        "error",
+        "Read conversations is enough to list conversations. "
+        "This token is missing that permission, or the Intercom app is not installed.",
+    )
+
+
+def missing_write_payload() -> dict:
+    return result_payload(
+        "error",
+        "Write conversations is required to send a reply or close a conversation. "
+        "Grant that scope on the Intercom app and sign in again.",
+    )
+
+
+def missing_admin_payload() -> dict:
+    return result_payload(
+        "error",
+        "Could not identify the signed-in Intercom teammate. "
+        "Grant Read admins and sign in again.",
+    )
+
+
+def region_failure_payload(last_error: ApiError | None) -> dict:
+    if last_error and is_missing_permission(last_error):
+        return missing_permission_payload()
+    if last_error and is_revoked_token(last_error):
+        return revoked_token_payload()
+    if last_error:
+        return result_payload("error", str(last_error))
+    return result_payload("error", "Could not reach Intercom.")
+
+
+def search_first_region(token: str, body: dict) -> dict:
+    config = load_config()
+    last_error: ApiError | None = None
+    for region in region_order(config.get("region")):
+        try:
+            payload = request_json(
+                f"{api_base_for_region(region)}/conversations/search",
+                token,
+                method="POST",
+                payload=body,
+            )
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_permission_payload()
+            if is_wrong_region(error) or error.status in (401, 403, 404):
+                continue
+            return result_payload("error", str(error))
+        me = try_identify(token, region)
+        persist_admin(me)
+        known_ids = [
+            str(item.get("id") or "").strip()
+            for item in (payload.get("conversations") or [])
+            if isinstance(item, dict)
+        ]
+        workspace = parse_workspace_id(
+            (me or {}).get("workspaceId")
+            or config.get("workspaceId")
+            or workspace_from_payload(payload)
+            or discover_workspace(token, region, known_ids)
+        )
+        if me and me.get("region"):
+            region = me["region"]
+        try:
+            fields: dict[str, object] = {"region": region}
+            if workspace:
+                fields["workspaceId"] = workspace
+            save_config(**fields)
+        except OSError:
+            pass
+        return {
+            "ok": True,
+            "region": region,
+            "workspace": workspace,
+            "payload": payload,
+            "me": me,
+        }
+    return region_failure_payload(last_error)
+
+
+def fetch(token_file: str | None = None, limit: int = DEFAULT_LIMIT) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    found = search_first_region(token, search_body(limit))
+    if not found.get("ok"):
+        return found
+    return fetch_waiting(
+        token,
+        found["region"],
+        found["workspace"],
+        limit,
+        found["payload"],
+        found.get("me") if isinstance(found.get("me"), dict) else None,
+    )
+
+
+def fetch_inbox(
+    token_file: str | None = None,
+    inbox_filter: str = "open",
+    limit: int = DEFAULT_LIMIT,
+) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    mode = filter_mode(inbox_filter)
+    if mode == "waiting":
+        mode = "open"
+    found = search_first_region(token, search_inbox_body(mode, limit))
+    if not found.get("ok"):
+        return found
+    payload = found.get("payload") if isinstance(found.get("payload"), dict) else {}
+    payload = dict(payload)
+    conversations = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
+    payload["conversations"] = attach_latest_messages(token, found["region"], conversations)
+    parsed = parse_inbox_search(payload, found["region"], found["workspace"], limit, mode)
+    me = found.get("me") if isinstance(found.get("me"), dict) else None
+    return result_payload(
+        "ready",
+        "",
+        waitingCount=parsed["waitingCount"],
+        openCount=parsed["openCount"],
+        inboxCount=parsed["inboxCount"],
+        inboxUrl=inbox_url(found["region"], found["workspace"]),
+        workspaceId=found["workspace"],
+        conversations=parsed["conversations"],
+        **identity_from_me(me),
+    )
+
+
+def fetch_open(token_file: str | None = None, limit: int = DEFAULT_LIMIT) -> dict:
+    return fetch_inbox(token_file, "open", limit)
+
+
+def fetch_thread(token_file: str | None, conversation_id: str) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    conv_id = str(conversation_id or "").strip()
+    if not conv_id:
+        return result_payload("error", "Missing conversation id.")
+    config = load_config()
+    last_error: ApiError | None = None
+    for region in region_order(config.get("region")):
+        try:
+            payload = request_json(
+                f"{api_base_for_region(region)}/conversations/"
+                f"{urllib.parse.quote(conv_id, safe='')}?display_as=plaintext",
+                token,
+            )
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_permission_payload()
+            if is_wrong_region(error) or error.status in (401, 403, 404):
+                continue
+            return result_payload("error", str(error))
+        workspace = parse_workspace_id(
+            config.get("workspaceId") or workspace_from_payload(payload)
+        )
+        payload = attach_missing_parts(token, region, conv_id, payload)
+        return result_payload(
+            "ready",
+            "",
+            inboxUrl=inbox_url(region, workspace),
+            workspaceId=workspace,
+            conversation=normalize_thread(payload, region, workspace),
+        )
+    return region_failure_payload(last_error)
+
+
+def oauth_path() -> str:
+    return os.path.join(os.path.dirname(default_token_path()), "oauth.json")
+
+
+def load_oauth() -> dict:
+    try:
+        with open(oauth_path(), encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        "clientId": str(parsed.get("clientId") or parsed.get("client_id") or "").strip(),
+        "clientSecret": str(parsed.get("clientSecret") or parsed.get("client_secret") or "").strip(),
+    }
+
+
+def save_oauth(raw: object) -> dict:
+    text = str(raw or "").strip()
+    incoming: dict = {}
+    if text:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return result_payload("error", "Could not read Intercom OAuth app credentials.")
+        if not isinstance(parsed, dict):
+            return result_payload("error", "Could not read Intercom OAuth app credentials.")
+        incoming = parsed
+    existing = load_oauth()
+    client_id = str(
+        incoming.get("clientId") or incoming.get("client_id") or existing.get("clientId") or ""
+    ).strip()
+    client_secret = str(
+        incoming.get("clientSecret")
+        or incoming.get("client_secret")
+        or existing.get("clientSecret")
+        or ""
+    ).strip()
+    if not client_id or not client_secret:
+        return result_payload("error", "Paste the Intercom app Client ID and secret first.")
+    path = oauth_path()
+    directory = os.path.dirname(path)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        os.chmod(directory, 0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"clientId": client_id, "clientSecret": client_secret}, handle)
+            handle.write("\n")
+        os.chmod(path, 0o600)
+    except OSError as error:
+        return result_payload("error", f"Could not save OAuth credentials: {error.strerror or error}")
+    return result_payload("saved", f"Saved OAuth app credentials to {path}")
+
+
+def oauth_authorize_url(client_id: str, state: str, region: str) -> str:
+    query = urllib.parse.urlencode({
+        "client_id": client_id,
+        "state": state,
+        "redirect_uri": OAUTH_REDIRECT,
+    })
+    return f"{inbox_host_for_region(region)}/oauth?{query}"
+
+
+def open_browser(url: str) -> bool:
+    try:
+        subprocess.Popen(
+            ["omarchy-launch-browser", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
+class OAuthCallbackServer(HTTPServer):
+    def __init__(self, expected_state: str) -> None:
+        super().__init__(("127.0.0.1", OAUTH_PORT), OAuthCallbackHandler)
+        self.expected_state = expected_state
+        self.code = ""
+        self.error = ""
+        self.finished = threading.Event()
+
+
+class OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path or "/"
+        query = urllib.parse.parse_qs(parsed.query)
+        server: OAuthCallbackServer = self.server  # type: ignore[assignment]
+        if path in ("/cancel", "/timeout"):
+            self._respond(200, "Sign-in cancelled.")
+            server.finished.set()
+            return
+        if path != "/callback":
+            self.send_error(404)
+            return
+        state = (query.get("state") or [""])[0]
+        error = (query.get("error") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        if error:
+            server.error = error
+        elif state != server.expected_state:
+            server.error = "Sign-in state did not match."
+        elif not code:
+            server.error = "Intercom did not return an authorization code."
+        else:
+            server.code = code
+        self._respond(200, "Signed in. You can close this window and return to Intercom notifier.")
+        server.finished.set()
+
+    def _respond(self, status: int, message: str) -> None:
+        body = (
+            "<!doctype html><meta charset=utf-8><title>Intercom</title>"
+            f"<p>{html.escape(message)}</p>"
+        ).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def wait_for_oauth_code(expected_state: str) -> tuple[str, str]:
+    try:
+        httpd = OAuthCallbackServer(expected_state)
+    except OSError:
+        return "", f"Could not start sign-in (port {OAUTH_PORT} in use)."
+
+    def serve() -> None:
+        while not httpd.finished.is_set():
+            httpd.timeout = 0.5
+            httpd.handle_request()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    if not httpd.finished.wait(LOGIN_TIMEOUT_SEC):
+        httpd.error = "Sign-in timed out. Try Sign in with Intercom again."
+        httpd.finished.set()
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{OAUTH_PORT}/timeout", timeout=1)
+        except Exception:
+            pass
+    thread.join(2)
+    try:
+        httpd.server_close()
+    except Exception:
+        pass
+    return httpd.code, httpd.error
+
+
+def exchange_oauth_code(code: str, client_id: str, client_secret: str) -> str:
+    last_error: ApiError | None = None
+    for region in region_order(load_config().get("region")):
+        url = f"{api_base_for_region(region)}/auth/eagle/token"
+        try:
+            payload = request_form(
+                url,
+                {"code": code, "client_id": client_id, "client_secret": client_secret},
+            )
+        except ApiError as error:
+            last_error = error
+            if error.status in (401, 403, 404):
+                continue
+            raise
+        token = str(payload.get("token") or payload.get("access_token") or "").strip()
+        if token:
+            return token
+        last_error = ApiError(0, "Intercom did not return an access token.", url)
+    if last_error:
+        raise last_error
+    raise ApiError(0, "Could not reach Intercom.", "")
+
+
+def logout(token_file: str | None = None) -> dict:
+    env_token = os.environ.get("INTERCOM_ACCESS_TOKEN", "").strip()
+    errors: list[str] = []
+    seen: set[str] = set()
+    for path in token_paths(token_file):
+        if path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+        except OSError as error:
+            errors.append(error.strerror or str(error))
+    remaining = [path for path in token_paths(token_file) if os.path.isfile(path)]
+    if remaining:
+        detail = errors[0] if errors else remaining[0]
+        return result_payload("error", f"Could not sign out: {detail}")
+    try:
+        save_config(adminId="", adminName="", adminEmail="")
+    except OSError as error:
+        return result_payload("error", f"Could not sign out: {error.strerror or error}")
+    if env_token:
+        return result_payload(
+            "error",
+            "Removed the saved token, but INTERCOM_ACCESS_TOKEN is still set. "
+            "Unset it to finish signing out.",
+        )
+    return result_payload(
+        "unconfigured",
+        "Signed out of Intercom. Sign in with Intercom to connect again.",
+    )
+
+
+def oauth_login(token_file: str | None = None) -> dict:
+    creds = load_oauth()
+    client_id = creds.get("clientId") or ""
+    client_secret = creds.get("clientSecret") or ""
+    if not client_id or not client_secret:
+        return result_payload("error", "Paste the Intercom app Client ID and secret first.")
+    state = secrets.token_urlsafe(24)
+    region = str(load_config().get("region") or "US")
+    url = oauth_authorize_url(client_id, state, region)
+    open_browser(url)
+    print(url, file=sys.stderr, flush=True)
+    code, error = wait_for_oauth_code(state)
+    if error and not code:
+        return result_payload("error", error)
+    if not code:
+        return result_payload("error", "Intercom did not return an authorization code.")
+    try:
+        token = exchange_oauth_code(code, client_id, client_secret)
+    except ApiError as error:
+        return result_payload("error", str(error))
+    saved = save_token(token, token_file)
+    if saved.get("state") != "saved":
+        return saved
+    identified = False
+    for try_region in region_order(region):
+        me = try_identify(token, try_region)
+        if not me:
+            continue
+        persist_admin(me)
+        identified = True
+        break
+    if not identified:
+        return result_payload(
+            "saved",
+            "Signed in, but could not read the teammate profile. Grant Read admins and sign in again.",
+        )
+    config = load_config()
+    return result_payload(
+        "saved",
+        "Signed in with Intercom.",
+        adminId=str(config.get("adminId") or ""),
+        adminName=str(config.get("adminName") or ""),
+        adminEmail=str(config.get("adminEmail") or ""),
+        workspaceId=str(config.get("workspaceId") or ""),
+    )
+
+
+def parse_reply_markdown(raw: object) -> str:
+    text = str(raw or "")
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and "body" in parsed:
+            return str(parsed.get("body") or "")
+    return text
+
+
+def parse_seen_comments(raw: object) -> list[dict]:
+    rows: list[dict] = []
+    if not isinstance(raw, list):
+        return rows
+    for item in raw:
+        if isinstance(item, str):
+            comment_id = item.strip()
+            if comment_id:
+                rows.append({"id": comment_id, "createdAt": 0})
+            continue
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("id") or "").strip()
+        if not comment_id:
+            continue
+        rows.append({
+            "id": comment_id,
+            "createdAt": unix_time(item.get("createdAt") if item.get("createdAt") is not None else item.get("created_at")),
+        })
+    return rows
+
+
+def parse_reply_request(raw: object) -> tuple[str, list[dict] | None, bool]:
+    body = parse_reply_markdown(raw)
+    text = str(raw or "").strip()
+    if not text.startswith("{"):
+        return body, None, False
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return body, None, False
+    if not isinstance(parsed, dict):
+        return body, None, False
+    seen = parse_seen_comments(parsed.get("seen")) if "seen" in parsed else None
+    return body, seen, parsed.get("note") is True
+
+
+def comment_messages(messages: object) -> list[dict]:
+    rows: list[dict] = []
+    if not isinstance(messages, list):
+        return rows
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        comment_id = str(item.get("id") or "").strip()
+        if not comment_id or kind not in ("customer", "teammate", "bot", "note"):
+            continue
+        rows.append(item)
+    return rows
+
+
+def newer_comments(fresh_messages: object, seen: list[dict]) -> list[dict]:
+    if not seen:
+        return []
+    seen_ids = {str(row.get("id") or "") for row in seen if str(row.get("id") or "")}
+    last_seen = 0
+    for row in seen:
+        created = int(row.get("createdAt") or 0)
+        if created > last_seen:
+            last_seen = created
+    new_rows: list[dict] = []
+    for msg in comment_messages(fresh_messages):
+        comment_id = str(msg.get("id") or "")
+        if comment_id in seen_ids:
+            continue
+        created = int(msg.get("createdAt") or 0)
+        if seen_ids and created < last_seen:
+            continue
+        new_rows.append(msg)
+    return new_rows
+
+
+def fetch_conversation(token: str, region: str, conv_id: str) -> dict:
+    payload = request_json(
+        f"{api_base_for_region(region)}/conversations/"
+        f"{urllib.parse.quote(conv_id, safe='')}?display_as=plaintext",
+        token,
+    )
+    return attach_missing_parts(token, region, conv_id, payload)
+
+
+def reply_conversation(token_file: str | None, conversation_id: str, markdown: object) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    conv_id = str(conversation_id or "").strip()
+    if not CONVERSATION_ID.fullmatch(conv_id):
+        return result_payload("error", "Missing conversation id.")
+    source, seen, as_note = parse_reply_request(markdown)
+    if not str(source or "").strip():
+        return result_payload("error", "Write a message before sending.")
+    body = markdown_to_html(source)
+    if not body:
+        return result_payload("error", "Write a message before sending.")
+    config = load_config()
+    last_error: ApiError | None = None
+    for region in region_order(config.get("region")):
+        base = api_base_for_region(region)
+        try:
+            me_payload = request_json(f"{base}/me", token)
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_admin_payload()
+            if is_wrong_region(error) or error.status in (401, 403, 404):
+                continue
+            return result_payload("error", str(error))
+        me = parse_me(me_payload)
+        admin_id = str(me.get("id") or "")
+        if not admin_id:
+            return missing_admin_payload()
+        persist_admin(me)
+        if me.get("region"):
+            region = str(me["region"])
+            base = api_base_for_region(region)
+        try:
+            current = fetch_conversation(token, region, conv_id)
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_permission_payload()
+            return result_payload("error", str(error))
+        workspace = parse_workspace_id(
+            me.get("workspaceId") or config.get("workspaceId") or workspace_from_payload(current)
+        )
+        conversation = normalize_thread(current, region, workspace)
+        if seen and newer_comments(conversation.get("messages") or [], seen):
+            try:
+                save_config(region=region, workspaceId=workspace or None)
+            except OSError:
+                pass
+            return result_payload(
+                "error",
+                "New comments arrived; reply was not sent.",
+                inboxUrl=inbox_url(region, workspace),
+                workspaceId=workspace,
+                conversation=conversation,
+            )
+        try:
+            payload = request_json(
+                f"{base}/conversations/{urllib.parse.quote(conv_id, safe='')}/reply",
+                token,
+                method="POST",
+                payload=admin_reply_body(admin_id, body, "note" if as_note else "comment"),
+            )
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_write_payload()
+            return result_payload("error", str(error))
+        workspace = parse_workspace_id(
+            me.get("workspaceId") or workspace or workspace_from_payload(payload)
+        )
+        try:
+            save_config(region=region, workspaceId=workspace or None)
+        except OSError:
+            pass
+        conversation = normalize_thread(payload, region, workspace)
+        if conversation.get("id") != conv_id:
+            conversation = normalize_thread(
+                {"id": conv_id, "conversation_parts": payload.get("conversation_parts"), "source": payload.get("source")},
+                region,
+                workspace,
+            )
+            if not conversation.get("id"):
+                conversation = {"id": conv_id, "title": "", "url": conversation_url(region, workspace, conv_id), "waitingSince": 0, "messages": []}
+        return result_payload(
+            "ready",
+            "",
+            inboxUrl=inbox_url(region, workspace),
+            workspaceId=workspace,
+            conversation=conversation,
+        )
+    if last_error and is_missing_permission(last_error):
+        return missing_write_payload()
+    return region_failure_payload(last_error)
+
+
+def close_conversation(token_file: str | None, conversation_id: str) -> dict:
+    return post_conversation_part(token_file, conversation_id, "close")
+
+
+def reopen_conversation(token_file: str | None, conversation_id: str) -> dict:
+    return post_conversation_part(token_file, conversation_id, "open")
+
+
+def post_conversation_part(token_file: str | None, conversation_id: str, message_type: str) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    conv_id = str(conversation_id or "").strip()
+    if not CONVERSATION_ID.fullmatch(conv_id):
+        return result_payload("error", "Missing conversation id.")
+    config = load_config()
+    last_error: ApiError | None = None
+    for region in region_order(config.get("region")):
+        base = api_base_for_region(region)
+        try:
+            me_payload = request_json(f"{base}/me", token)
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_admin_payload()
+            if is_wrong_region(error) or error.status in (401, 403, 404):
+                continue
+            return result_payload("error", str(error))
+        me = parse_me(me_payload)
+        admin_id = str(me.get("id") or "")
+        if not admin_id:
+            return missing_admin_payload()
+        persist_admin(me)
+        if me.get("region"):
+            region = str(me["region"])
+            base = api_base_for_region(region)
+        try:
+            payload = request_json(
+                f"{base}/conversations/{urllib.parse.quote(conv_id, safe='')}/parts",
+                token,
+                method="POST",
+                payload=admin_part_body(admin_id, message_type),
+            )
+        except ApiError as error:
+            last_error = error
+            if is_missing_permission(error):
+                return missing_write_payload()
+            return result_payload("error", str(error))
+        workspace = parse_workspace_id(
+            me.get("workspaceId") or config.get("workspaceId") or workspace_from_payload(payload)
+        )
+        try:
+            save_config(region=region, workspaceId=workspace or None)
+        except OSError:
+            pass
+        conversation = normalize_thread(payload, region, workspace)
+        wanted_state = "open" if str(message_type or "").strip().lower() == "open" else "closed"
+        if conversation.get("id") != conv_id:
+            conversation = {
+                "id": conv_id,
+                "title": "",
+                "url": conversation_url(region, workspace, conv_id),
+                "waitingSince": 0,
+                "state": wanted_state,
+                "messages": [],
+            }
+        else:
+            conversation["state"] = wanted_state
+        return result_payload(
+            "ready",
+            "",
+            inboxUrl=inbox_url(region, workspace),
+            workspaceId=workspace,
+            conversation=conversation,
+        )
+    if last_error and is_missing_permission(last_error):
+        return missing_write_payload()
+    return region_failure_payload(last_error)
+
+
+def sync_status_payload(
+    state: str,
+    message: str,
+    scanned: int = 0,
+    stored: int = 0,
+    skipped: int = 0,
+    failed: int = 0,
+    total: int = 0,
+    synced_at: int = 0,
+    **fields: object,
+) -> dict:
+    payload = {
+        "state": state,
+        "message": message,
+        "scanned": max(0, int(scanned)),
+        "stored": max(0, int(stored)),
+        "skipped": max(0, int(skipped)),
+        "failed": max(0, int(failed)),
+        "total": max(0, int(total)),
+        "syncedAt": max(0, int(synced_at)),
+    }
+    payload.update(fields)
+    return payload
+
+
+def write_sync_status(payload: dict) -> None:
+    write_json_file(archive_status_path(), payload)
+
+
+def load_archive_index() -> dict[str, dict]:
+    parsed = read_json_file(archive_index_path())
+    if not isinstance(parsed, dict):
+        return {}
+    conversations = parsed.get("conversations")
+    if not isinstance(conversations, dict):
+        return {}
+    index: dict[str, dict] = {}
+    for key, value in conversations.items():
+        conv_id = str(key or "").strip()
+        if not CONVERSATION_ID.fullmatch(conv_id) or not isinstance(value, dict):
+            continue
+        index[conv_id] = value
+    return index
+
+
+def save_archive_index(index: dict[str, dict], synced_at: int) -> None:
+    write_json_file(
+        archive_index_path(),
+        {
+            "syncedAt": max(0, int(synced_at)),
+            "count": len(index),
+            "conversations": index,
+        },
+    )
+
+
+def archive_thread_stored(conversation_id: str) -> bool:
+    return os.path.isfile(archive_thread_path(conversation_id))
+
+
+def store_archive_thread(record: dict) -> None:
+    conv_id = str(record.get("id") or "").strip()
+    if not CONVERSATION_ID.fullmatch(conv_id):
+        raise ValueError("Missing conversation id.")
+    write_json_file(archive_thread_path(conv_id), record)
+
+
+def fetch_archive_thread(token: str, region: str, conv_id: str) -> dict | None:
+    try:
+        return fetch_conversation(token, region, conv_id)
+    except ApiError:
+        return None
+
+
+def sync_search_page(
+    token: str,
+    region: str,
+    workspace: str,
+    rows: list[object],
+    index: dict[str, dict],
+) -> tuple[int, int, int, int]:
+    scanned = stored = skipped = failed = 0
+    to_fetch: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        conv_id = str(item.get("id") or "").strip()
+        if not CONVERSATION_ID.fullmatch(conv_id):
+            continue
+        scanned += 1
+        already = archive_thread_stored(conv_id)
+        if not should_fetch_archive_thread(conversation_state(item), already):
+            if conv_id not in index:
+                index[conv_id] = archive_index_row(archive_thread_record(item, region, workspace))
+            skipped += 1
+            continue
+        to_fetch.append(conv_id)
+    details: dict[str, dict] = {}
+    if to_fetch:
+        workers = max(1, min(DETAIL_WORKERS, len(to_fetch)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(fetch_archive_thread, token, region, conv_id): conv_id
+                for conv_id in to_fetch
+            }
+            for future in concurrent.futures.as_completed(futures):
+                conv_id = futures[future]
+                try:
+                    payload = future.result()
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    details[conv_id] = payload
+    for conv_id in to_fetch:
+        payload = details.get(conv_id)
+        if not isinstance(payload, dict) or str(payload.get("id") or "").strip() != conv_id:
+            failed += 1
+            continue
+        try:
+            record = archive_thread_record(payload, region, workspace)
+            store_archive_thread(record)
+            index[conv_id] = archive_index_row(record)
+            stored += 1
+        except (OSError, ValueError):
+            failed += 1
+    return scanned, stored, skipped, failed
+
+
+def sync_conversations(token_file: str | None = None) -> dict:
+    token = read_token(token_file)
+    if not token:
+        payload = unconfigured_payload(token_file)
+        return sync_status_payload(
+            "unconfigured",
+            str(payload.get("message") or "Sign in with Intercom to connect this plugin."),
+        )
+    found = search_first_region(token, search_all_body(SYNC_PAGE_SIZE))
+    if not found.get("ok"):
+        message = str(found.get("message") or "Could not list Intercom conversations.")
+        state = str(found.get("state") or "error")
+        status = sync_status_payload(state, message)
+        try:
+            write_sync_status(status)
+        except OSError:
+            pass
+        return status
+    region = str(found.get("region") or "US")
+    workspace = str(found.get("workspace") or "")
+    me = found.get("me") if isinstance(found.get("me"), dict) else None
+    first = found.get("payload") if isinstance(found.get("payload"), dict) else {}
+    try:
+        total = max(0, int(first.get("total_count") or 0))
+    except (TypeError, ValueError):
+        total = 0
+    index = load_archive_index()
+    scanned = stored = skipped = failed = 0
+    page = first
+    pages = 0
+    synced_at = int(time.time())
+    status = sync_status_payload(
+        "syncing",
+        "Syncing conversations…",
+        total=total,
+        synced_at=synced_at,
+        **identity_from_me(me),
+    )
+    try:
+        write_sync_status(status)
+    except OSError as error:
+        return sync_status_payload("error", f"Could not write archive: {error.strerror or error}")
+    while pages < MAX_SYNC_PAGES:
+        pages += 1
+        rows = page.get("conversations") if isinstance(page.get("conversations"), list) else []
+        page_scanned, page_stored, page_skipped, page_failed = sync_search_page(
+            token,
+            region,
+            workspace,
+            rows,
+            index,
+        )
+        scanned += page_scanned
+        stored += page_stored
+        skipped += page_skipped
+        failed += page_failed
+        if total < scanned:
+            total = scanned
+        status = sync_status_payload(
+            "syncing",
+            f"Syncing {scanned} of {total}…" if total else f"Syncing {scanned} conversations…",
+            scanned=scanned,
+            stored=stored,
+            skipped=skipped,
+            failed=failed,
+            total=total,
+            synced_at=synced_at,
+            **identity_from_me(me),
+        )
+        try:
+            write_sync_status(status)
+            save_archive_index(index, synced_at)
+        except OSError as error:
+            return sync_status_payload("error", f"Could not write archive: {error.strerror or error}")
+        cursor = search_next_cursor(page)
+        if not cursor:
+            break
+        try:
+            page = request_json(
+                f"{api_base_for_region(region)}/conversations/search",
+                token,
+                method="POST",
+                payload=search_all_body(SYNC_PAGE_SIZE, cursor),
+            )
+        except ApiError as error:
+            if is_missing_permission(error):
+                status = missing_permission_payload()
+                message = str(status.get("message") or str(error))
+                result = sync_status_payload("error", message, scanned, stored, skipped, failed, total, synced_at)
+                try:
+                    write_sync_status(result)
+                except OSError:
+                    pass
+                return result
+            result = sync_status_payload("error", str(error), scanned, stored, skipped, failed, total, synced_at)
+            try:
+                write_sync_status(result)
+            except OSError:
+                pass
+            return result
+    if failed and stored == 0 and skipped == 0:
+        message = "Could not store Intercom conversations."
+        result = sync_status_payload("error", message, scanned, stored, skipped, failed, total, synced_at)
+    else:
+        message = f"Synced {len(index)} conversations."
+        if skipped:
+            message = f"Synced {len(index)} conversations ({skipped} closed already stored)."
+        result = sync_status_payload(
+            "ready",
+            message,
+            scanned,
+            stored,
+            skipped,
+            failed,
+            total,
+            synced_at,
+            **identity_from_me(me),
+        )
+    try:
+        write_sync_status(result)
+        save_archive_index(index, synced_at)
+    except OSError as error:
+        return sync_status_payload("error", f"Could not write archive: {error.strerror or error}")
+    return result
+
+
+def archive_row_haystack(row: dict) -> str:
+    parts = [
+        row.get("id"),
+        row.get("title"),
+        row.get("from"),
+        row.get("email"),
+        row.get("snippet"),
+        row.get("state"),
+    ]
+    messages = row.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            parts.extend([msg.get("body"), msg.get("from"), msg.get("email")])
+    return " ".join(str(part or "") for part in parts).lower()
+
+
+def haystack_matches(haystack: str, tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    text = str(haystack or "").lower()
+    return all(token in text for token in tokens)
+
+
+def search_archive_local(query: str, limit: int = SEARCH_LIMIT) -> list[dict]:
+    tokens = search_tokens(query)
+    cap = max(1, min(SEARCH_LIMIT, int(limit)))
+    if not tokens:
+        return []
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for conv_id, row in load_archive_index().items():
+        if not isinstance(row, dict):
+            continue
+        if not haystack_matches(archive_row_haystack(row), tokens):
+            continue
+        hits.append(archive_index_row(row if row.get("id") else {**row, "id": conv_id}))
+        seen.add(conv_id)
+        if len(hits) >= cap:
+            return hits
+    threads_dir = os.path.join(archive_dir(), "threads")
+    try:
+        names = os.listdir(threads_dir)
+    except OSError:
+        return hits
+    for name in names:
+        if len(hits) >= cap:
+            break
+        if not name.endswith(".json"):
+            continue
+        conv_id = name[:-5]
+        if conv_id in seen or not CONVERSATION_ID.fullmatch(conv_id):
+            continue
+        path = os.path.join(threads_dir, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        if not haystack_matches(text, tokens):
+            continue
+        parsed = read_json_file(path)
+        if not isinstance(parsed, dict):
+            continue
+        hits.append(archive_index_row(parsed))
+        seen.add(conv_id)
+    return hits
+
+
+def search_conversations(token_file: str | None, query: str, remote: bool = False, limit: int = SEARCH_LIMIT) -> dict:
+    text = str(query or "").strip()
+    if not text:
+        return result_payload("error", "Type a search query.")
+    cap = max(1, min(SEARCH_LIMIT, int(limit)))
+    if not remote:
+        conversations = search_archive_local(text, cap)
+        return result_payload(
+            "ready",
+            "" if conversations else "No local conversations matched.",
+            conversations=conversations,
+            openCount=len(conversations),
+        )
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload(token_file)
+    found = search_first_region(token, search_remote_body(text, cap))
+    if not found.get("ok"):
+        return found
+    payload = found.get("payload") if isinstance(found.get("payload"), dict) else {}
+    parsed = parse_search_results(payload, found["region"], found["workspace"], cap)
+    me = found.get("me") if isinstance(found.get("me"), dict) else None
+    return result_payload(
+        "ready",
+        "" if parsed["conversations"] else "No Intercom conversations matched.",
+        conversations=parsed["conversations"],
+        openCount=parsed["openCount"],
+        waitingCount=parsed["waitingCount"],
+        inboxUrl=inbox_url(found["region"], found["workspace"]),
+        workspaceId=found["workspace"],
+        **identity_from_me(me),
+    )
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--token-file", default="", help="Path to the Intercom access token file")
+    parser.add_argument(
+        "--save-token",
+        action="store_true",
+        help="Read a token from stdin and save it to the token file (mode 0600)",
+    )
+    parser.add_argument(
+        "--save-oauth",
+        action="store_true",
+        help="Read Intercom OAuth client ID and secret JSON from stdin and save it (mode 0600)",
+    )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Sign in with Intercom via OAuth and save the per-user access token",
+    )
+    parser.add_argument(
+        "--logout",
+        action="store_true",
+        help="Remove the saved Intercom access token and sign out",
+    )
+    parser.add_argument(
+        "--reply",
+        default="",
+        help="Send a Markdown reply to a conversation id (body on stdin)",
+    )
+    parser.add_argument(
+        "--close",
+        default="",
+        help="Close a conversation id as the signed-in teammate",
+    )
+    parser.add_argument(
+        "--reopen",
+        default="",
+        help="Reopen a closed conversation id as the signed-in teammate",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Fetch all conversations, including closed, into a local archive",
+    )
+    parser.add_argument(
+        "--search",
+        default="",
+        help="Search conversations in the local archive (or Intercom with --remote)",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Search via the Intercom API instead of the local archive",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Intercom workspace ID from the inbox URL (saved next to the token)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help="Maximum conversations to list (1-150)",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="List recent open conversations that are not snoozed",
+    )
+    parser.add_argument(
+        "--inbox",
+        default="",
+        help="List conversations for a filter: open, waiting, closed, snoozed, all",
+    )
+    parser.add_argument(
+        "--conversation",
+        default="",
+        help="Fetch all messages for a conversation id",
+    )
+    parser.add_argument(
+        "--panel",
+        default="",
+        help="Save expanded or large as the default panel",
+    )
+    parser.add_argument(
+        "--filter",
+        default="",
+        help="Save the expanded inbox filter: open, waiting, closed, snoozed, all",
+    )
+    parser.add_argument(
+        "--viewed",
+        default="",
+        help="Save the last-viewed conversation id",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    token_file = args.token_file.strip() or None
+    if args.save_oauth and args.login:
+        saved = save_oauth(sys.stdin.readline())
+        payload = saved if saved.get("state") == "error" else oauth_login(token_file)
+    elif args.save_oauth:
+        payload = save_oauth(sys.stdin.readline())
+    elif args.login:
+        payload = oauth_login(token_file)
+    elif args.logout:
+        payload = logout(token_file)
+    elif args.save_token:
+        payload = save_token(sys.stdin.readline(), token_file, args.workspace)
+    elif args.sync:
+        payload = sync_conversations(token_file)
+    elif str(args.search or "").strip():
+        payload = search_conversations(
+            token_file,
+            args.search,
+            args.remote,
+            max(1, min(SEARCH_LIMIT, args.limit)),
+        )
+    elif str(args.reopen or "").strip():
+        payload = reopen_conversation(token_file, args.reopen)
+    elif str(args.close or "").strip():
+        payload = close_conversation(token_file, args.close)
+    elif str(args.reply or "").strip():
+        payload = reply_conversation(token_file, args.reply, sys.stdin.readline())
+    elif args.workspace is not None:
+        workspace = parse_workspace_id(args.workspace)
+        if not workspace:
+            payload = result_payload(
+                "error",
+                "Could not read a workspace ID. Paste the Intercom inbox URL from your browser.",
+            )
+        else:
+            try:
+                save_config(workspaceId=workspace)
+                payload = result_payload("saved", f"Saved workspace {workspace} to {config_path()}")
+            except OSError as error:
+                payload = result_payload("error", f"Could not save workspace: {error.strerror or error}")
+    elif str(args.panel or "").strip() or str(args.filter or "").strip() or str(args.viewed or "").strip():
+        payload = save_prefs(args.panel, args.filter, args.viewed)
+    elif str(args.conversation or "").strip():
+        payload = fetch_thread(token_file, args.conversation)
+    elif str(args.inbox or "").strip():
+        payload = fetch_inbox(token_file, args.inbox, max(1, min(150, args.limit)))
+    elif args.open:
+        payload = fetch_open(token_file, max(1, min(150, args.limit)))
+    else:
+        payload = fetch(token_file, max(1, min(150, args.limit)))
+    json.dump(payload, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "intercom-notifier",
+  "name": "Intercom notifier",
+  "version": "1.1.0",
+  "author": "mattw",
+  "license": "MIT",
+  "description": "See Intercom conversations waiting for a reply, and reply as yourself.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Intercom notifier",
+    "description": "Waiting and open Intercom conversation counts, with a reader that can send a teammate reply.",
+    "category": "Communication",
+    "aliases": ["intercom", "inbox"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "tokenFile": "",
+      "refreshIntervalSec": 60,
+      "maxConversations": 20
+    },
+    "schema": [
+      {
+        "key": "tokenFile",
+        "type": "path",
+        "label": "Access token file",
+        "defaultValue": "",
+        "description": "Optional path to a file containing your Intercom OAuth access token. Defaults to ~/.config/omarchy/intercom-notifier/token. The INTERCOM_ACCESS_TOKEN environment variable wins if set."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 3600,
+        "step": 15,
+        "defaultValue": 60,
+        "description": "How often to poll Intercom for conversations waiting for a reply."
+      },
+      {
+        "key": "maxConversations",
+        "type": "integer",
+        "label": "Conversations to list",
+        "min": 5,
+        "max": 150,
+        "step": 5,
+        "defaultValue": 20,
+        "description": "Maximum number of waiting conversations to fetch and show in the panel."
+      }
+    ]
+  }
+}
