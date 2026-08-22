@@ -404,7 +404,7 @@ def search_state_body(state: str, limit: int, now: float | None = None) -> dict:
     clauses: list[dict[str, object]] = [
         {"field": "state", "operator": "=", "value": wanted},
     ]
-    if wanted in ("closed", "snoozed") and per_page > 1:
+    if wanted == "closed" and per_page > 1:
         since = int((time.time() if now is None else now) - RECENT_INBOX_SECONDS)
         clauses.append({"field": "updated_at", "operator": ">", "value": max(0, since)})
     return {
@@ -980,10 +980,12 @@ def normalize_thread(conv: dict, region: str, workspace_id: str) -> dict:
 
 def conversation_state(conv: dict) -> str:
     state = str(conv.get("state") or "").strip().lower()
-    if state in ("open", "closed", "snoozed"):
-        return state
-    if is_snoozed(conv):
+    if state == "closed":
+        return "closed"
+    if state == "snoozed" or is_snoozed(conv):
         return "snoozed"
+    if state == "open":
+        return "open"
     if conv.get("open") is False:
         return "closed"
     return "open"
@@ -1089,6 +1091,8 @@ def parse_inbox_search(
             continue
         row = normalize_search_conversation(item, region, workspace_id)
         if row:
+            if mode == "snoozed":
+                row["state"] = "snoozed"
             conversations.append(row)
     conversations = sort_open(conversations)[: max(0, int(limit))]
     total = payload.get("total_count")
@@ -1484,6 +1488,9 @@ def attach_latest_messages(token: str, region: str, conversations: list[object])
             row["conversation_parts"] = extra["conversation_parts"]
         if extra.get("title"):
             row["title"] = extra["title"]
+        for key in ("state", "open", "snoozed_until", "waiting_since", "updated_at"):
+            if extra.get(key) is not None:
+                row[key] = extra[key]
         merged.append(row)
     return merged
 

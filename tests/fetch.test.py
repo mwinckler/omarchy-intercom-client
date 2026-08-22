@@ -303,7 +303,7 @@ class FetchTests(unittest.TestCase):
         snoozed = FETCH.search_inbox_body("snoozed", 15)
         snoozed_fields = {item["field"] for item in snoozed["query"]["value"] if isinstance(item, dict)}
         self.assertEqual(snoozed["query"]["value"][0]["value"], "snoozed")
-        self.assertIn("updated_at", snoozed_fields)
+        self.assertEqual(snoozed_fields, {"state"})
         self.assertEqual(snoozed["pagination"]["per_page"], 15)
         self.assertEqual(
             FETCH.search_inbox_body("all", 20)["query"]["operator"],
@@ -404,6 +404,14 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(FETCH.conversation_state({"open": False}), "closed")
         self.assertEqual(FETCH.conversation_state({"state": "open"}), "open")
         self.assertEqual(FETCH.conversation_state({"state": "snoozed"}), "snoozed")
+        self.assertEqual(
+            FETCH.conversation_state({"state": "open", "snoozed_until": 9_999_999_999}),
+            "snoozed",
+        )
+        self.assertEqual(
+            FETCH.conversation_state({"state": "closed", "snoozed_until": 9_999_999_999}),
+            "closed",
+        )
         self.assertFalse(FETCH.should_fetch_archive_thread("closed", True))
         self.assertTrue(FETCH.should_fetch_archive_thread("closed", False))
         self.assertTrue(FETCH.should_fetch_archive_thread("open", True))
@@ -502,6 +510,14 @@ class FetchTests(unittest.TestCase):
                     "state": "snoozed",
                     "source": {"body": "Wait"},
                 },
+                {
+                    "id": "until",
+                    "title": "Snoozed until",
+                    "updated_at": 500,
+                    "state": "open",
+                    "snoozed_until": 9_999_999_999,
+                    "source": {"body": "Later"},
+                },
             ],
         }
         parsed = FETCH.parse_open_search(payload, "US", "ws", 20)
@@ -509,7 +525,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(parsed["conversations"][0]["updatedAt"], 300)
         self.assertEqual(parsed["conversations"][0]["from"], "Bo")
         self.assertEqual(parsed["conversations"][1]["waitingSince"], 50)
-        self.assertEqual(parsed["openCount"], 3)
+        self.assertEqual(parsed["openCount"], 2)
         self.assertEqual(parsed["waitingCount"], 1)
         self.assertEqual(parsed["conversations"][0]["state"], "open")
         closed = FETCH.parse_inbox_search(
@@ -560,6 +576,35 @@ class FetchTests(unittest.TestCase):
         )
         self.assertEqual([row["id"] for row in snoozed["conversations"]], ["later"])
         self.assertEqual(snoozed["conversations"][0]["state"], "snoozed")
+        snoozed_until = FETCH.parse_inbox_search(
+            {
+                "total_count": 2,
+                "conversations": [
+                    {
+                        "id": "later",
+                        "title": "Snoozed",
+                        "state": "open",
+                        "snoozed_until": 9_999_999_999,
+                        "updated_at": 400,
+                        "source": {"body": "Wait", "author": {"name": "Cy"}},
+                    },
+                    {
+                        "id": "also",
+                        "title": "Also snoozed",
+                        "snoozed_until": 9_999_999_999,
+                        "updated_at": 300,
+                        "source": {"body": "Hold", "author": {"name": "Di"}},
+                    },
+                ],
+            },
+            "US",
+            "ws",
+            20,
+            "snoozed",
+        )
+        self.assertEqual([row["id"] for row in snoozed_until["conversations"]], ["later", "also"])
+        self.assertEqual({row["state"] for row in snoozed_until["conversations"]}, {"snoozed"})
+        self.assertEqual(snoozed_until["inboxCount"], 2)
         mixed = FETCH.parse_inbox_search(
             {
                 "total_count": 3,
@@ -626,6 +671,26 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(row["from"], "Bo")
         self.assertEqual(row["email"], "bo@example.com")
         self.assertEqual(row["snippet"], "Latest from customer")
+
+    def test_attach_latest_messages_copies_snoozed_state(self):
+        def fake_detail(token, region, conv_id):
+            return {
+                "id": conv_id,
+                "state": "snoozed",
+                "open": True,
+                "snoozed_until": 9_999_999_999,
+                "source": {"body": "Hi"},
+            }
+
+        with patch.object(FETCH, "fetch_conversation_detail", side_effect=fake_detail):
+            merged = FETCH.attach_latest_messages(
+                "tok",
+                "US",
+                [{"id": "1", "state": "open", "source": {"body": "old"}}],
+            )
+        self.assertEqual(merged[0]["state"], "snoozed")
+        self.assertEqual(merged[0]["snoozed_until"], 9_999_999_999)
+        self.assertTrue(merged[0]["open"])
 
     def test_fetch_open_attaches_latest_messages(self):
         search_payload = {
