@@ -2342,6 +2342,16 @@ Panel {
               ? Border.controlSpec("normal", root.foreground, root.accent)
               : Border.flat(root.alpha(root.foreground, 0.13), 1)
             radius: Style.cornerRadius
+            clip: true
+
+            NetworkPulse {
+              z: 10
+              anchors.top: parent.top
+              anchors.left: parent.left
+              anchors.right: parent.right
+              active: !root.searchOpen && intercom.openLoading
+              accent: root.accent
+            }
 
             Flickable {
               id: inboxFlick
@@ -2979,56 +2989,6 @@ Panel {
           PauseAnimation { duration: (2 - index) * 160 }
         }
       }
-    }
-  }
-
-  component NetworkPulse: Item {
-    id: bar
-
-    property bool active: false
-    property color accent: Color.accent
-
-    height: 2
-    clip: true
-    visible: opacity > 0.01
-    opacity: active ? 1 : 0
-
-    Behavior on opacity {
-      NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
-    }
-
-    Rectangle {
-      anchors.fill: parent
-      color: Qt.rgba(bar.accent.r, bar.accent.g, bar.accent.b, 0.18)
-    }
-
-    Rectangle {
-      id: pulse
-      property real progress: 0
-      width: Math.max(Style.space(48), bar.width * 0.28)
-      height: parent.height
-      x: -width + progress * (bar.width + width)
-      visible: bar.width > 0
-      gradient: Gradient {
-        orientation: Gradient.Horizontal
-        GradientStop { position: 0.0; color: "transparent" }
-        GradientStop { position: 0.55; color: bar.accent }
-        GradientStop { position: 1.0; color: Qt.rgba(bar.accent.r, bar.accent.g, bar.accent.b, 0.12) }
-      }
-    }
-
-    SequentialAnimation {
-      running: bar.active && bar.width > 0
-      loops: Animation.Infinite
-      NumberAnimation {
-        target: pulse
-        property: "progress"
-        from: 0
-        to: 1
-        duration: 900
-        easing.type: Easing.InOutCubic
-      }
-      PauseAnimation { duration: 240 }
     }
   }
 

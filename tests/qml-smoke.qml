@@ -40,6 +40,13 @@ ShellRoot {
     Component.onCompleted: open()
   }
 
+  Intercom.NetworkPulse {
+    id: pulseProbe
+    visible: false
+    width: 120
+    active: false
+  }
+
   Intercom.ConversationRow {
     id: rowProbe
     visible: false
@@ -75,8 +82,8 @@ ShellRoot {
     interval: 1200
     running: true
     onTriggered: {
-      if (!shell.rowProbePassed || widget.width <= 0 || messageProbe.implicitHeight <= 0 || !widget.opened) {
-        console.error("intercom qml smoke failed", shell.rowProbePassed, widget.width, widget.opened, messageProbe.implicitHeight)
+      if (!shell.rowProbePassed || widget.width <= 0 || messageProbe.implicitHeight <= 0 || pulseProbe.height !== 2 || !widget.opened) {
+        console.error("intercom qml smoke failed", shell.rowProbePassed, widget.width, widget.opened, messageProbe.implicitHeight, pulseProbe.height)
         widget.close()
         Qt.quit()
         return
