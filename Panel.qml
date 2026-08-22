@@ -230,13 +230,17 @@ Panel {
 
   function ensureInboxCursor() {
     var wanted = String(expandConversationId || "")
+    if (wanted === "") {
+      inboxCursorIndex = -1
+      return
+    }
     var selection = Model.resolveInboxSelection(
       intercom.openConversations,
       intercom.inboxFilter,
       wanted,
-      wanted === "" ? 0 : inboxCursorIndex
+      inboxCursorIndex
     )
-    inboxCursorIndex = wanted !== "" && selection.id !== wanted ? -1 : selection.index
+    inboxCursorIndex = selection.id !== wanted ? -1 : selection.index
   }
 
   function selectedInboxConversation() {
@@ -382,24 +386,41 @@ Panel {
     setInboxFilter(mode)
   }
 
+  function clearInboxSelection() {
+    inboxCursorIndex = -1
+    expandConversationId = ""
+    pinViewedSelection = false
+    pane = "list"
+    root.keepReplyOnConversation("")
+    intercom.loadThread("")
+  }
+
   function setInboxFilter(filter) {
     if (settingsOpen) return
     var mode = Model.inboxFilterMode(filter)
     endFilterChord()
     if (intercom.inboxFilter === mode) return
+    root.clearInboxSelection()
     intercom.saveFilter(mode)
   }
 
   function syncInboxSelection() {
     if (root.searchOpen) return
     var wanted = String(expandConversationId || "")
+    if (wanted === "") {
+      inboxCursorIndex = -1
+      if (intercom.openLoading) return
+      root.keepReplyOnConversation("")
+      intercom.loadThread("")
+      return
+    }
     var selection = Model.resolveInboxSelection(
       intercom.openConversations,
       intercom.inboxFilter,
       wanted,
-      wanted === "" ? 0 : inboxCursorIndex
+      inboxCursorIndex
     )
-    if (wanted !== "" && selection.id !== wanted) {
+    if (selection.id !== wanted) {
       inboxCursorIndex = -1
       root.keepReplyOnConversation(wanted)
       if (String(intercom.threadId || "") !== wanted)
@@ -408,19 +429,9 @@ Panel {
       return
     }
     inboxCursorIndex = selection.index
-    if (selection.id === "") {
-      if (intercom.openLoading) return
-      root.keepReplyOnConversation("")
-      expandConversationId = ""
-      intercom.loadThread("")
-      return
-    }
     root.keepReplyOnConversation(selection.id)
-    var firstSelection = expandConversationId === ""
-    expandConversationId = selection.id
     if (String(intercom.threadId || "") !== expandConversationId)
       intercom.loadThread(expandConversationId)
-    if (firstSelection) scrollThreadToEnd()
     root.acknowledgeDisplayedConversation()
   }
 

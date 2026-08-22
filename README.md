@@ -1,15 +1,15 @@
 # Intercom notifier
 
-An Omarchy bar widget that shows how many Intercom conversations are waiting
-for a reply, lists them most recent first, lets you reply as your own teammate,
-notifies you when a new customer message arrives, and opens the selected
-conversation in your browser.
+An Omarchy bar widget that lets you manage messages in your Intercom helpdesk
+without needing to interact with Intercom's own web interface.
 
-This is **not** Intercom Inbox unread. Inbox unread is per teammate and is not
-exposed by Intercom's public REST API. The public `read` flag is a single
-workspace-wide boolean, so this plugin instead lists **open conversations where
-the customer is waiting** (`waiting_since` is set). Snoozed threads are omitted.
-A thread drops off once an admin replies, not when someone merely opens it.
+The plugin includes the following features:
+
+- Status bar icon indicating how many conversations are waiting for a reply (any conversation where the last reply was not a team member), how many total conversations are open, and whether there new messages you haven't seen yet
+- A pane showing a list of conversations matching the current filter (Open, Waiting (for reply), Closed, Snoozed, or All) and the ability to navigate through conversations and view all messages in them
+- An inline editor to reply to a conversation (or add a private note) using Markdown
+- The ability to schedule replies for a future date instead of sending right away (handy for answering customer support in the middle of the night while not wanting to give customers the impression that you're available at all hours)
+
 
 ## Install
 
