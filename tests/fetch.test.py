@@ -98,6 +98,27 @@ class FetchTests(unittest.TestCase):
         linked = FETCH.format_message_body("Visit https://example.com/path for more")
         self.assertIn('<a href="https://example.com/path">https://example.com/path</a>', linked)
         self.assertEqual(FETCH.format_message_body("<p></p>"), "")
+        self.assertEqual(FETCH.format_message_body("<div>Hello</div><div>World</div>"), "Hello<br>World")
+        self.assertEqual(
+            FETCH.format_message_body("<div>Hello</div><div><br></div><div>World</div>"),
+            "Hello<br><br>World",
+        )
+        gmail = (
+            '<div dir="ltr"><div>Account Name: Grimké Seminary</div>'
+            "<div><br></div>"
+            "<div>Account Owner: Kyle Archuleta</div>"
+            "<div><span><br></span></div>"
+            "<div><br></div>"
+            "<span>-- </span><br>"
+            "<div><div><b>Zack Veselik</b></div>"
+            "<b>Account Executive</b></div></div>"
+        )
+        self.assertEqual(
+            FETCH.format_message_body(gmail),
+            "Account Name: Grimké Seminary<br><br>"
+            "Account Owner: Kyle Archuleta<br><br>"
+            "-- <br><b>Zack Veselik</b><br><b>Account Executive</b>",
+        )
         self.assertEqual(FETCH.is_safe_http_url("https://example.com"), "https://example.com")
         self.assertEqual(FETCH.is_safe_http_url("javascript:alert(1)"), "")
 

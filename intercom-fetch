@@ -270,7 +270,11 @@ class MessageFormatter(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre"):
+        if tag == "div":
+            # Email HTML (Gmail) uses <div> as a line, matching Intercom's web inbox.
+            self._block_break()
+            return
+        if tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre"):
             self._paragraph_break()
             return
         if tag == "li":
@@ -1385,7 +1389,7 @@ def fetch_conversation_detail(token: str, region: str, conv_id: str) -> dict | N
         return None
     try:
         return request_json(
-            f"{api_base_for_region(region)}/conversations/{conv_id}?display_as=plaintext",
+            f"{api_base_for_region(region)}/conversations/{conv_id}",
             token,
         )
     except ApiError:
@@ -1430,7 +1434,7 @@ def attach_missing_parts(token: str, region: str, conv_id: str, conv: dict) -> d
         pages += 1
         url = (
             f"{base}/conversations/{urllib.parse.quote(conv_id, safe='')}"
-            f"?display_as=plaintext&starting_after={urllib.parse.quote(cursor)}"
+            f"?starting_after={urllib.parse.quote(cursor)}"
         )
         try:
             extra = request_json(url, token)
@@ -1830,7 +1834,7 @@ def fetch_thread(token_file: str | None, conversation_id: str) -> dict:
         try:
             payload = request_json(
                 f"{api_base_for_region(region)}/conversations/"
-                f"{urllib.parse.quote(conv_id, safe='')}?display_as=plaintext",
+                f"{urllib.parse.quote(conv_id, safe='')}",
                 token,
             )
         except ApiError as error:
@@ -2204,7 +2208,7 @@ def newer_comments(fresh_messages: object, seen: list[dict]) -> list[dict]:
 def fetch_conversation(token: str, region: str, conv_id: str) -> dict:
     payload = request_json(
         f"{api_base_for_region(region)}/conversations/"
-        f"{urllib.parse.quote(conv_id, safe='')}?display_as=plaintext",
+        f"{urllib.parse.quote(conv_id, safe='')}",
         token,
     )
     return attach_missing_parts(token, region, conv_id, payload)
