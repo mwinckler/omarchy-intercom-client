@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import Quickshell
 import "plugin" as Intercom
 import "plugin/Model.js" as Model
@@ -8,6 +9,20 @@ ShellRoot {
 
   property bool rowProbePassed: false
   property var probeService: null
+
+  function draftStyleMatches(row, highlighted) {
+    if (!row || !row.draft || row.border.width !== 0
+        || !Qt.colorEqual(row.color, row.alpha(row.draftColor, highlighted ? 0.28 : 0.18))) return false
+    for (var i = 0; i < row.children.length; i++) {
+      var border = row.children[i]
+      if (border.objectName !== "draftBorder") continue
+      var path = border.data[0]
+      return border.visible && path.strokeStyle === ShapePath.DashLine
+        && path.capStyle === ShapePath.RoundCap && path.dashPattern.length === 2
+        && path.dashPattern[0] === 0 && path.dashPattern[1] === 3
+    }
+    return false
+  }
 
   QtObject {
     id: fakeBar
@@ -154,6 +169,43 @@ ShellRoot {
         Qt.quit()
         return
       }
+      var draftConversationId = widget.expandConversationId
+      service.messagesLoading = false
+      service.showThread({ id: draftConversationId, messages: [] })
+      service.drafts = Model.setDraft({}, draftConversationId, "Unsent reply", false)
+      widget.selectThreadItem("draft")
+      var draftRow = widget.threadFocusDelegate()
+      if (!draftStyleMatches(draftRow, true) || messageProbe.draft) {
+        console.error("intercom qml smoke failed: selected draft styling or sent message changed")
+        Qt.quit()
+        return
+      }
+      widget.pane = "list"
+      if (!draftStyleMatches(draftRow, false)) {
+        console.error("intercom qml smoke failed: unselected draft styling")
+        Qt.quit()
+        return
+      }
+      draftRow.pointerHovered = true
+      if (!draftStyleMatches(draftRow, true)) {
+        console.error("intercom qml smoke failed: hovered draft styling")
+        Qt.quit()
+        return
+      }
+      draftRow.pointerHovered = false
+      service.drafts = Model.setDraft({}, draftConversationId, "Unsent note", true)
+      if (!draftRow.note || !draftStyleMatches(draftRow, false)) {
+        console.error("intercom qml smoke failed: note draft styling")
+        Qt.quit()
+        return
+      }
+      widget.openComposer()
+      if (!widget.composing || !draftRow.note || !draftStyleMatches(draftRow, false)) {
+        console.error("intercom qml smoke failed: live draft preview styling")
+        Qt.quit()
+        return
+      }
+      widget.stopComposing(true)
       widget.compositorFocusLost = true
       widget.toggle()
       if (!widget.opened) {

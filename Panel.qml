@@ -2560,6 +2560,7 @@ Panel {
                   MessageRow {
                     id: draftMessageRow
                     width: parent.width
+                    draft: true
                     message: ({
                       from: Model.adminLabel(intercom.adminName, intercom.adminEmail, "You"),
                       email: String(intercom.adminEmail || ""),

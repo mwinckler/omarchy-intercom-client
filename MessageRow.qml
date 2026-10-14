@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -9,6 +10,7 @@ BorderSurface {
 
   property var message: ({})
   property bool selected: false
+  property bool draft: false
   property bool unread: false
   property color unreadColor: Color.urgent
   property color foreground: Color.foreground
@@ -21,6 +23,7 @@ BorderSurface {
   signal linkActivated(string url)
 
   readonly property color dim: Qt.darker(foreground, 1.5)
+  readonly property color draftColor: "#a78bfa"
   readonly property string kind: String(root.message.kind || "customer").toLowerCase()
   readonly property bool note: kind === "note"
   readonly property bool teammate: kind === "teammate"
@@ -30,14 +33,39 @@ BorderSurface {
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
 
   implicitHeight: inner.implicitHeight + Style.space(16)
-  color: selected || pointerHovered ? Style.hoverFillFor(foreground, accent)
+  color: draft ? alpha(draftColor, selected || pointerHovered ? 0.28 : 0.18)
+    : selected || pointerHovered ? Style.hoverFillFor(foreground, accent)
     : note ? alpha(foreground, 0.04)
     : teammate ? alpha(accent, 0.10)
     : "transparent"
-  borderSpec: selected
+  borderSpec: draft ? Border.none() : selected
     ? Border.controlSpec("normal", foreground, accent)
     : Border.flat(alpha(note ? foreground : (teammate ? accent : foreground), note || teammate ? 0.22 : 0.13), 1)
   radius: Style.cornerRadius
+
+  Shape {
+    objectName: "draftBorder"
+    anchors.fill: parent
+    visible: root.draft
+    preferredRendererType: Shape.CurveRenderer
+
+    ShapePath {
+      fillColor: "transparent"
+      strokeColor: root.alpha(root.draftColor, root.selected || root.pointerHovered ? 0.95 : 0.65)
+      strokeWidth: 2
+      strokeStyle: ShapePath.DashLine
+      dashPattern: [0, 3]
+      capStyle: ShapePath.RoundCap
+
+      PathRectangle {
+        x: 1
+        y: 1
+        width: Math.max(0, root.width - 2)
+        height: Math.max(0, root.height - 2)
+        radius: Math.max(0, root.radius - 1)
+      }
+    }
+  }
 
   Rectangle {
     objectName: "unreadDot"
