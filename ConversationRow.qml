@@ -8,6 +8,7 @@ BorderSurface {
 
   property var conversation: ({})
   property bool selected: false
+  property bool unread: false
   property color foreground: Color.foreground
   property color accent: Color.accent
   property color urgent: Color.urgent
@@ -32,6 +33,17 @@ BorderSurface {
     ? Border.controlSpec("normal", foreground, accent)
     : Border.flat(alpha(foreground, 0.13), 1)
   radius: Style.cornerRadius
+
+  Rectangle {
+    visible: root.unread
+    x: Style.space(3)
+    y: Style.space(3)
+    width: Style.space(7)
+    height: width
+    radius: width / 2
+    color: root.urgent
+    z: 1
+  }
 
   HoverHandler {
     id: hoverHandler

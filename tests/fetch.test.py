@@ -4,14 +4,73 @@ import os
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-FETCH = SourceFileLoader("intercom_fetch", str(ROOT / "intercom-fetch")).load_module()
+loader = SourceFileLoader("intercom_fetch", str(ROOT / "intercom-fetch"))
+FETCH = module_from_spec(spec_from_loader(loader.name, loader))
+loader.exec_module(FETCH)
 
 
 class FetchTests(unittest.TestCase):
+    def test_collect_search_pages_has_no_total_limit(self):
+        first = {
+            "total_count": 201,
+            "conversations": [{"id": str(i)} for i in range(150)],
+            "pages": {"next": {"starting_after": "page-2"}},
+        }
+        second = {"conversations": [{"id": str(i)} for i in range(149, 201)], "pages": {}}
+        body = FETCH.search_open_body(150)
+        with patch.object(FETCH, "request_json", return_value=second) as request:
+            result = FETCH.collect_search_pages("tok", "US", body, first)
+        self.assertEqual(len(result["conversations"]), 201)
+        self.assertEqual(result["total_count"], 201)
+        self.assertEqual(request.call_args.kwargs["payload"]["pagination"]["starting_after"], "page-2")
+        self.assertNotIn("starting_after", body["pagination"])
+
+    def test_collect_search_pages_rejects_repeated_cursor(self):
+        page = {"conversations": [{"id": "1"}], "pages": {"next": {"starting_after": "same"}}}
+        with patch.object(FETCH, "request_json", return_value=page):
+            with self.assertRaises(FETCH.ApiError):
+                FETCH.collect_search_pages("tok", "US", FETCH.search_open_body(150), page)
+
+    def test_fetch_open_includes_every_page_even_with_small_page_size(self):
+        first = {"total_count": 3, "conversations": [{"id": "1", "state": "open"}],
+                 "pages": {"next": {"starting_after": "page-2"}}}
+        second = {"conversations": [{"id": "2", "state": "open"}, {"id": "3", "state": "open"}]}
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+            FETCH, "search_first_region", return_value={"ok": True, "region": "US", "workspace": "ws", "payload": first}
+        ), patch.object(FETCH, "request_json", return_value=second), patch.object(
+            FETCH, "attach_latest_messages", side_effect=lambda token, region, rows: rows
+        ) as details:
+            result = FETCH.fetch_open(None, 1)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["openCount"], 3)
+        self.assertEqual(len(result["conversations"]), 3)
+        self.assertEqual(len(details.call_args.args[2]), 3)
+
+    def test_fetch_waiting_includes_every_page(self):
+        first = {"total_count": 2, "conversations": [{"id": "1", "waiting_since": 10}],
+                 "pages": {"next": {"starting_after": "page-2"}}}
+        second = {"conversations": [{"id": "2", "waiting_since": 20}]}
+        with patch.object(FETCH, "request_json", return_value=second), patch.object(
+            FETCH, "attach_latest_messages", side_effect=lambda token, region, rows: rows
+        ), patch.object(FETCH, "fetch_inbox_counts", return_value=None):
+            result = FETCH.fetch_waiting("tok", "US", "ws", 1, first)
+        self.assertEqual(result["waitingCount"], 2)
+        self.assertEqual(len(result["conversations"]), 2)
+
+    def test_pagination_failure_does_not_return_a_partial_inbox(self):
+        first = {"total_count": 2, "conversations": [{"id": "1", "state": "open"}],
+                 "pages": {"next": {"starting_after": "page-2"}}}
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+            FETCH, "search_first_region", return_value={"ok": True, "region": "US", "workspace": "ws", "payload": first}
+        ), patch.object(FETCH, "request_json", side_effect=FETCH.ApiError(500, "Failed page")):
+            result = FETCH.fetch_open(None, 1)
+        self.assertEqual(result["state"], "error")
+
     def setUp(self):
         self._xdg = tempfile.TemporaryDirectory()
         self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -310,14 +369,11 @@ class FetchTests(unittest.TestCase):
         closed = FETCH.search_inbox_body("closed", 20)
         fields = {item["field"] for item in closed["query"]["value"] if isinstance(item, dict)}
         self.assertEqual(closed["query"]["value"][0]["value"], "closed")
-        self.assertIn("updated_at", fields)
+        self.assertEqual(fields, {"state"})
         self.assertEqual(closed["sort"]["field"], "updated_at")
         self.assertEqual(closed["pagination"]["per_page"], 20)
         recent = FETCH.search_state_body("closed", 20, now=1_700_000_000)
-        self.assertEqual(
-            recent["query"]["value"][1],
-            {"field": "updated_at", "operator": ">", "value": 1_700_000_000 - FETCH.RECENT_INBOX_SECONDS},
-        )
+        self.assertEqual(recent["query"]["value"], [{"field": "state", "operator": "=", "value": "closed"}])
         count_only = FETCH.search_inbox_body("closed", 1)
         count_fields = {item["field"] for item in count_only["query"]["value"] if isinstance(item, dict)}
         self.assertEqual(count_fields, {"state"})

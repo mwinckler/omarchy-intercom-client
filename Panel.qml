@@ -25,6 +25,7 @@ Panel {
   readonly property string sizeShortcutHint: root.large ? "e smaller" : "e larger"
   property bool showingSettings: false
   property bool composing: false
+  onComposingChanged: Qt.callLater(root.acknowledgeFocusedMessage)
   property bool replyAsNote: false
   property string replyConversationId: ""
   property string pane: "list"
@@ -56,7 +57,15 @@ Panel {
   property bool scrollPendingSelection: false
   property bool pinViewedSelection: false
   property bool filterChordActive: false
-  property var inboxConversations: Model.filterInbox(intercom.openConversations, intercom.inboxFilter)
+  readonly property var inboxRows: Model.includeUnreadConversations(intercom.openConversations, [
+    Model.inboxCacheConversations(intercom.inboxCache),
+    intercom.conversations,
+    Model.cachedConversations(intercom.threadCache)
+  ], intercom.localReadState)
+  property var inboxConversations: Model.filterInbox(root.inboxRows, intercom.inboxFilter)
+  onInboxConversationsChanged: {
+    if (root.opened && !root.settingsOpen && !root.searchOpen) root.ensureInboxCursor()
+  }
   readonly property bool needsWorkspace: intercom.state === "ready" && String(intercom.workspaceId || "") === ""
   readonly property bool needsSetup: intercom.state === "unconfigured" || intercom.state === "error" || root.needsWorkspace
   readonly property bool signedIn: Model.isSignedIn(intercom.state, intercom.adminName, intercom.adminEmail, intercom.adminId)
@@ -123,17 +132,24 @@ Panel {
   property string pendingCancelLabel: ""
   readonly property bool confirmOpen: root.cancelConfirmOpen
   readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen
+  onOverlayOpenChanged: Qt.callLater(root.acknowledgeFocusedMessage)
 
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
 
   function prefetchVisibleThreads(force) {
     if (!root.opened || root.settingsOpen) return
-    if (root.searchOpen) {
-      var hit = root.selectedSearchConversation() || {}
-      intercom.prefetchThreads(root.searchResults, hit.id, force)
-      return
+    var rows = root.searchOpen ? root.searchResults : root.inboxConversations
+    var visibleRows = []
+    if (inboxFlick) {
+      for (var i = 0; i < rows.length; i++) {
+        var item = inboxRepeater.itemAt(i)
+        if (item && item.y + item.height >= inboxFlick.contentY
+            && item.y <= inboxFlick.contentY + inboxFlick.height) visibleRows.push(rows[i])
+      }
     }
-    intercom.prefetchThreads(root.inboxConversations, root.expandConversationId, force)
+    var priority = root.searchOpen ? String((root.selectedSearchConversation() || {}).id || "")
+      : root.expandConversationId
+    intercom.prefetchThreads(visibleRows, priority, force)
   }
 
   function moveExpanded(dx, dy) {
@@ -235,7 +251,7 @@ Panel {
       return
     }
     var selection = Model.resolveInboxSelection(
-      intercom.openConversations,
+      root.inboxRows,
       intercom.inboxFilter,
       wanted,
       inboxCursorIndex
@@ -270,7 +286,7 @@ Panel {
     if (id !== "") intercom.saveViewed(id)
     if (expandConversationId !== "") intercom.loadThread(expandConversationId)
     scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeDisplayedConversation)
+    Qt.callLater(root.acknowledgeFocusedMessage)
   }
 
   function expandConversation(conversation) {
@@ -291,7 +307,7 @@ Panel {
       intercom.loadThread(expandConversationId)
     ensureInboxCursor()
     scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeDisplayedConversation)
+    Qt.callLater(root.acknowledgeFocusedMessage)
     if (scrollPendingSelection && inboxConversations.length > 0) {
       scrollPendingSelection = false
       scrollInboxIntoView()
@@ -417,7 +433,7 @@ Panel {
       return
     }
     var selection = Model.resolveInboxSelection(
-      intercom.openConversations,
+      root.inboxRows,
       intercom.inboxFilter,
       wanted,
       inboxCursorIndex
@@ -427,14 +443,14 @@ Panel {
       root.keepReplyOnConversation(wanted)
       if (String(intercom.threadId || "") !== wanted)
         intercom.loadThread(wanted)
-      root.acknowledgeDisplayedConversation()
+      root.acknowledgeFocusedMessage()
       return
     }
     inboxCursorIndex = selection.index
     root.keepReplyOnConversation(selection.id)
     if (String(intercom.threadId || "") !== expandConversationId)
       intercom.loadThread(expandConversationId)
-    root.acknowledgeDisplayedConversation()
+    root.acknowledgeFocusedMessage()
   }
 
   function applyInboxFilter() {
@@ -616,10 +632,14 @@ Panel {
     return String(root.expandConversationId || "").trim()
   }
 
-  function acknowledgeDisplayedConversation() {
+  function acknowledgeFocusedMessage() {
     var id = root.displayedConversationId()
-    if (id === "" || !root.panelHasKeyboardFocus() || !root.showingSelectedThread) return
-    intercom.markDisplayedMessagesRead(id)
+    if (id === "" || !root.panelHasKeyboardFocus() || !root.showingSelectedThread
+        || root.pane !== "thread" || root.composing || root.overlayOpen) return
+    var items = root.threadFocusList
+    if (threadFocusIndex < 0 || threadFocusIndex >= items.length) return
+    var item = items[threadFocusIndex] || {}
+    if (item.kind === "message") intercom.markMessageRead(id, item.index)
   }
 
   function refreshNow() {
@@ -658,7 +678,7 @@ Panel {
     intercom.searchMessage = ""
     if (String(expandConversationId || "") !== "") intercom.loadThread(expandConversationId)
     else root.syncInboxSelection()
-    root.acknowledgeDisplayedConversation()
+    root.acknowledgeFocusedMessage()
     Qt.callLater(function() {
       if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
     })
@@ -742,7 +762,7 @@ Panel {
     intercom.saveViewed(id)
     intercom.loadThread(id)
     root.scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeDisplayedConversation)
+    Qt.callLater(root.acknowledgeFocusedMessage)
     root.prefetchVisibleThreads()
   }
 
@@ -972,6 +992,7 @@ Panel {
     )
     threadFocusIndex = resolved.index
     threadFocusKey = resolved.key
+    Qt.callLater(root.acknowledgeFocusedMessage)
   }
 
   function ensureThreadFocus() {
@@ -983,6 +1004,7 @@ Panel {
     var next = Model.moveThreadFocus(root.threadFocusList, threadFocusKey, threadFocusIndex, delta)
     threadFocusIndex = next.index
     threadFocusKey = next.key
+    root.acknowledgeFocusedMessage()
     pinThreadToEnd = false
     root.scrollThreadFocusIntoView()
   }
@@ -1000,6 +1022,9 @@ Panel {
   }
 
   function selectThreadItem(kind, id, index) {
+    // A card click restores panel focus even after switching monitors/workspaces.
+    root.compositorFocusLost = false
+    if (!root.composing && keyCatcher) keyCatcher.forceActiveFocus()
     pane = "thread"
     var items = root.threadFocusList
     var wantedKind = String(kind || "")
@@ -1012,6 +1037,7 @@ Panel {
           && String(item.id || "") !== wantedId) continue
       threadFocusIndex = i
       threadFocusKey = String(item.key || "")
+      root.acknowledgeFocusedMessage()
       root.scrollThreadFocusIntoView()
       return
     }
@@ -1353,7 +1379,7 @@ Panel {
         } else {
           keyCatcher.forceActiveFocus()
         }
-        root.acknowledgeDisplayedConversation()
+        root.acknowledgeFocusedMessage()
       })
     } else {
       compositorFocusLost = false
@@ -1377,7 +1403,7 @@ Panel {
     }
     onMessagesChanged: {
       if (root.opened && root.pinThreadToEnd) root.scrollThreadToEnd()
-      Qt.callLater(root.acknowledgeDisplayedConversation)
+      Qt.callLater(root.acknowledgeFocusedMessage)
     }
     onNewWaitingMessages: function(conversations) {
       var id = root.displayedConversationId()
@@ -1454,7 +1480,7 @@ Panel {
 
   function stealPanelFocus() {
     root.compositorFocusLost = false
-    Qt.callLater(root.acknowledgeDisplayedConversation)
+    Qt.callLater(root.acknowledgeFocusedMessage)
     if (panel) {
       panel.focusPrimed = false
       if (typeof panel.beginFocusPrime === "function") panel.beginFocusPrime()
@@ -1493,10 +1519,19 @@ Panel {
     }
     function status(): string {
       return JSON.stringify({
+        implementationVersion: 3,
         state: intercom.state,
         waitingCount: intercom.waitingCount,
         openCount: intercom.openCount,
-        conversationCount: intercom.conversations.length
+        conversationCount: intercom.conversations.length,
+        inboxConversationCount: root.inboxConversations.length,
+        unreadConversationCount: Model.pendingUrgentCount(intercom.pendingUrgent),
+        unreadInboxConversationCount: root.inboxConversations.filter(function(row) {
+          return !!intercom.pendingUrgent[String(row.id)]
+        }).length,
+        displayedUnreadMessageCount: intercom.messages.filter(function(msg) {
+          return Model.messageUnread(intercom.localReadState, intercom.threadId, msg)
+        }).length
       })
     }
   }
@@ -2376,6 +2411,8 @@ Panel {
               boundsBehavior: Flickable.StopAtBounds
               flickableDirection: Flickable.VerticalFlick
               interactive: contentHeight > height
+              onContentYChanged: Qt.callLater(root.prefetchVisibleThreads)
+              onContentHeightChanged: Qt.callLater(root.prefetchVisibleThreads)
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
               Column {
@@ -2406,6 +2443,7 @@ Panel {
                     required property var modelData
                     width: inboxColumn.width
                     conversation: modelData
+                    unread: !!intercom.pendingUrgent[String(modelData.id)]
                     waitingLabel: root.searchOpen
                       ? root.searchResultWaitingLabel(modelData)
                       : Model.formatWaiting(modelData.waitingSince, root.nowMs)
@@ -2498,6 +2536,8 @@ Panel {
                     required property int index
                     width: threadColumn.width
                     message: modelData
+                    unread: Model.messageUnread(intercom.localReadState, intercom.threadId, modelData)
+                    unreadColor: root.urgent
                     selected: root.threadItemSelected("message", modelData.id, index)
                     timeLabel: Model.formatMessageTime(modelData.createdAt, root.nowMs)
                     foreground: root.foreground

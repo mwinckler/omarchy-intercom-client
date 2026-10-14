@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 INTERCOM_VERSION = "2.14"
 UNSTABLE_VERSION = "Unstable"
-DEFAULT_LIMIT = 20
+DEFAULT_LIMIT = 150
 RECENT_INBOX_SECONDS = 30 * 24 * 60 * 60
 SYNC_PAGE_SIZE = 150
 MAX_SYNC_PAGES = 500
@@ -408,9 +408,6 @@ def search_state_body(state: str, limit: int, now: float | None = None) -> dict:
     clauses: list[dict[str, object]] = [
         {"field": "state", "operator": "=", "value": wanted},
     ]
-    if wanted == "closed" and per_page > 1:
-        since = int((time.time() if now is None else now) - RECENT_INBOX_SECONDS)
-        clauses.append({"field": "updated_at", "operator": ">", "value": max(0, since)})
     return {
         "query": {
             "operator": "AND",
@@ -780,6 +777,34 @@ def search_next_cursor(payload: dict) -> str:
     if isinstance(nxt, str):
         return nxt.strip()
     return str(pages.get("next") or "").strip()
+
+
+def collect_search_pages(token: str, region: str, body: dict, first: dict) -> dict:
+    """Fetch the complete result set; per_page is not an inbox size limit."""
+    rows: dict[str, dict] = {}
+    page = first
+    cursors: set[str] = set()
+    while True:
+        for row in page.get("conversations") or []:
+            if isinstance(row, dict) and str(row.get("id") or ""):
+                rows[str(row["id"])] = row
+        cursor = search_next_cursor(page)
+        if not cursor:
+            break
+        if cursor in cursors:
+            raise ApiError(502, "Intercom repeated an inbox pagination cursor.")
+        cursors.add(cursor)
+        request = dict(body)
+        request["pagination"] = dict(body.get("pagination") or {})
+        request["pagination"]["starting_after"] = cursor
+        page = request_json(
+            f"{api_base_for_region(region)}/conversations/search",
+            token, method="POST", payload=request,
+        )
+    result = dict(first)
+    result["conversations"] = list(rows.values())
+    result["pages"] = {}
+    return result
 
 
 def author_type(author: object) -> str:
@@ -1514,10 +1539,14 @@ def fetch_waiting(
             method="POST",
             payload=search_body(limit),
         )
+    try:
+        payload = collect_search_pages(token, region, search_body(limit), payload)
+    except ApiError as error:
+        return result_payload("error", str(error))
     conversations = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
     payload = dict(payload)
     payload["conversations"] = attach_latest_messages(token, region, conversations)
-    parsed = parse_search(payload, region, workspace_id, limit)
+    parsed = parse_search(payload, region, workspace_id, len(conversations))
     try:
         counts = fetch_inbox_counts(token, region)
     except Exception:
@@ -1799,10 +1828,16 @@ def fetch_inbox(
     if not found.get("ok"):
         return found
     payload = found.get("payload") if isinstance(found.get("payload"), dict) else {}
-    payload = dict(payload)
-    conversations = payload.get("conversations") if isinstance(payload.get("conversations"), list) else []
-    payload["conversations"] = attach_latest_messages(token, found["region"], conversations)
-    parsed = parse_inbox_search(payload, found["region"], found["workspace"], limit, mode)
+    try:
+        payload = collect_search_pages(token, found["region"], search_inbox_body(mode, limit), payload)
+    except ApiError as error:
+        return result_payload("error", str(error))
+    # Keep active inbox previews current, but don't fetch thousands of archived
+    # bodies just to list Closed/All. Those full threads load on selection.
+    conversations = payload["conversations"]
+    if mode in ("open", "snoozed"):
+        payload["conversations"] = attach_latest_messages(token, found["region"], conversations)
+    parsed = parse_inbox_search(payload, found["region"], found["workspace"], len(conversations), mode)
     me = found.get("me") if isinstance(found.get("me"), dict) else None
     return result_payload(
         "ready",
@@ -2811,12 +2846,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--limit",
         type=int,
         default=DEFAULT_LIMIT,
-        help="Maximum conversations to list (1-150)",
+        help="API page size (1-150); inbox and waiting lists fetch every page",
     )
     parser.add_argument(
         "--open",
         action="store_true",
-        help="List recent open conversations that are not snoozed",
+        help="List all open conversations that are not snoozed",
     )
     parser.add_argument(
         "--inbox",

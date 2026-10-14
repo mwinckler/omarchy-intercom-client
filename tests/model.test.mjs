@@ -41,6 +41,57 @@ localReads = model.updateLocalReadState(localReads, { id: "local", messages: [
   { id: "other", kind: "teammate", email: "other@example.com", body: "Another teammate" }
 ] }, false, "me@example.com");
 assert.equal(localReads.local.$other, false);
+assert.equal(model.messageUnread(localReads, "local", { id: "other" }), true);
+assert.equal(model.messageUnread(localReads, "local", firstMessage), false);
+assert.equal(model.messageUnread(localReads, "missing", firstMessage), false);
+
+// Focusing one card clears only its dot, and urgency lasts until the last unread card.
+let focusedReads = model.updateLocalReadState({}, {
+  id: "cards", messages: [firstMessage, secondMessage]
+}, false);
+focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", messages: [firstMessage] }, true);
+assert.equal(model.messageUnread(focusedReads, "cards", firstMessage), false);
+assert.equal(model.messageUnread(focusedReads, "cards", secondMessage), true);
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(focusedReads)), 1);
+focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", messages: [secondMessage] }, true);
+assert.equal(model.messageUnread(focusedReads, "cards", secondMessage), false);
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(focusedReads)), 0);
+
+const anonymousMessage = { createdAt: 100, kind: "customer", from: "Customer", body: "No ID" };
+let anonymousReads = model.updateLocalReadState({}, { id: "cards", messages: [anonymousMessage] }, false);
+assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), true);
+anonymousReads = model.updateLocalReadState(anonymousReads, { id: "cards", messages: [anonymousMessage] }, true);
+assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), false);
+
+// A locally unread thread outside the limited inbox page must remain reachable.
+const page = [{ id: "recent", state: "open", updatedAt: 200 }];
+const oldThreads = [
+  { id: "older", state: "open", updatedAt: 100, messages: [firstMessage, secondMessage] },
+  { id: "closed-unread", state: "closed", updatedAt: 50, messages: [firstMessage] },
+  { id: "already-read", state: "open", messages: [firstMessage] }
+];
+let pageReads = {};
+for (const thread of oldThreads) {
+  pageReads = model.updateLocalReadState(pageReads, thread, thread.id === "already-read");
+}
+let reachable = model.includeUnreadConversations(page, [oldThreads, oldThreads], pageReads);
+assert.deepEqual(Array.from(reachable, row => row.id), ["older", "closed-unread", "recent"]);
+assert.deepEqual(Array.from(model.filterInbox(reachable, "open"), row => row.id), ["older", "recent"]);
+assert.deepEqual(Array.from(model.filterInbox(reachable, "closed"), row => row.id), ["closed-unread"]);
+assert.equal(model.resolveInboxSelection(reachable, "open", "older", 1).index, 0);
+pageReads = model.updateLocalReadState(pageReads, { id: "older", messages: [firstMessage] }, true);
+reachable = model.includeUnreadConversations(page, [oldThreads], pageReads);
+assert.equal(reachable[0].id, "older");
+pageReads = model.updateLocalReadState(pageReads, oldThreads[0], true);
+reachable = model.includeUnreadConversations(page, [oldThreads], pageReads);
+assert.deepEqual(Array.from(reachable, row => row.id), ["closed-unread", "recent"]);
+// The full thread state takes precedence over summaries missing a state.
+reachable = model.includeUnreadConversations(page, [
+  [{ id: "closed-unread", state: "", updatedAt: 50 }],
+  [oldThreads[1]]
+], pageReads);
+assert.equal(reachable[0].state, "closed");
+assert.equal(model.filterInbox(reachable, "open").length, 1);
 assert.equal(JSON.stringify(model.normalizeLocalReadState({ bad: { "$m": "false", "$n": false } })),
   JSON.stringify({ bad: { "$n": false } }));
 

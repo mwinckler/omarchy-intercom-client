@@ -108,11 +108,18 @@ US, EU, and AU API hosts are tried automatically. The region that succeeds is ca
 - A desktop notification appears when a customer message puts a thread into waiting
   (or sends a follow-up on one that is already waiting). The toast shows the sender
   and a preview; clicking it opens this widget expanded on that conversation.
-- The bar icon flashes while any fetched messages remain unread locally. Displaying
-  their conversation in the focused plugin panel marks those messages read. Read
+- The bar icon flashes while any fetched messages remain unread locally and stops
+  when none remain. Unread message cards have a dot in their upper-left corner.
+  Focusing a message with the keyboard or clicking its card marks only that message
+  read; merely opening its conversation does not. Read
   status survives restarts in `~/.config/omarchy/intercom-notifier/cache.json` and
   is independent of Intercom's read status; background fetching or closing a
   conversation does not mark it read. Your own replies and notes are excluded.
+- Conversation rows also show an unread dot. Unread conversations missing from
+  the latest inbox page remain at the top of their matching filter, so older
+  unread messages cannot leave the tray flashing without a way to reach them.
+- Inbox filters fetch every API page: all open conversations appear in Open,
+  regardless of age or count. The API's 150-row page size is not a display limit.
 
 ## Keybinding
 

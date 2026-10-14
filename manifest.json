@@ -19,8 +19,7 @@
     "defaultSection": "right",
     "defaults": {
       "tokenFile": "",
-      "refreshIntervalSec": 60,
-      "maxConversations": 20
+      "refreshIntervalSec": 60
     },
     "schema": [
       {
@@ -39,16 +38,6 @@
         "step": 15,
         "defaultValue": 60,
         "description": "How often to poll Intercom for conversations waiting for a reply."
-      },
-      {
-        "key": "maxConversations",
-        "type": "integer",
-        "label": "Conversations to list",
-        "min": 5,
-        "max": 150,
-        "step": 5,
-        "defaultValue": 20,
-        "description": "Maximum number of waiting conversations to fetch and show in the panel."
       }
     ]
   }

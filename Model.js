@@ -1198,6 +1198,19 @@ function normalizeLocalReadState(value) {
   return next
 }
 
+function localMessageKey(value) {
+  var msg = normalizeMessage(value)
+  return "$" + (msg.id || JSON.stringify([msg.createdAt, msg.kind, msg.from, msg.body]))
+}
+
+function messageUnread(value, conversationId, message) {
+  var id = textValue(conversationId)
+  if (!isSafeConversationId(id)) return false
+  var known = objectValue(objectValue(value)[id])
+  var key = localMessageKey(message)
+  return Object.prototype.hasOwnProperty.call(known, key) && known[key] === false
+}
+
 function updateLocalReadState(value, conversation, read, ownEmail) {
   var next = normalizeLocalReadState(value)
   var conv = normalizeConversation(conversation)
@@ -1209,7 +1222,7 @@ function updateLocalReadState(value, conversation, read, ownEmail) {
     // Sending our own reply or note must not create an unread alert.
     if (email !== "" && (msg.kind === "teammate" || msg.kind === "note")
         && msg.email.trim().toLowerCase() === email) continue
-    var key = "$" + (msg.id || JSON.stringify([msg.createdAt, msg.kind, msg.from, msg.body]))
+    var key = localMessageKey(msg)
     if (read || !Object.prototype.hasOwnProperty.call(known, key)) known[key] = !!read
   }
   next[conv.id] = known
@@ -1228,6 +1241,33 @@ function localUnreadConversations(value) {
     }
   }
   return pending
+}
+
+// Inbox API pages are limited. Keep unread threads reachable even when they
+// fall off that page; otherwise the tray can flash with nothing to read in it.
+function includeUnreadConversations(conversations, lists, readState) {
+  var rows = normalizeConversationList(conversations)
+  var unread = localUnreadConversations(readState)
+  var known = {}
+  for (var i = 0; i < rows.length; i++) known[rows[i].id] = true
+  var extra = {}
+  var sources = arrayValue(lists)
+  for (var s = 0; s < sources.length; s++) {
+    var source = normalizeConversationList(sources[s])
+    for (var j = 0; j < source.length; j++) {
+      var row = source[j]
+      if (!isSafeConversationId(row.id) || !unread[row.id] || known[row.id]) continue
+      if (!extra[row.id]) extra[row.id] = row
+      // Full thread responses supply the state omitted by waiting summaries.
+      if (row.state !== "") extra[row.id].state = row.state
+    }
+  }
+  var missing = []
+  for (var id in extra) {
+    if (Object.prototype.hasOwnProperty.call(extra, id)) missing.push(extra[id])
+  }
+  missing.sort(function(a, b) { return b.updatedAt - a.updatedAt })
+  return missing.concat(rows)
 }
 
 function addPendingUrgent(pending, conversations) {

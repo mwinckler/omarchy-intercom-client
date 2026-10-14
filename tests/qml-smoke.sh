@@ -12,7 +12,7 @@ ln -s -- /usr/share/omarchy/shell/Commons "$smoke_root/Commons"
 ln -s -- /usr/share/omarchy/shell/Ui "$smoke_root/Ui"
 
 set +e
-output=$(timeout --kill-after=2s 8s quickshell --no-color -p "$smoke_root" 2>&1)
+output=$(XDG_CONFIG_HOME="$smoke_root/config" timeout --kill-after=2s 8s quickshell --no-color -p "$smoke_root" 2>&1)
 status=$?
 set -e
 printf '%s\n' "$output"

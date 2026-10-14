@@ -1,11 +1,13 @@
 import QtQuick
 import Quickshell
 import "plugin" as Intercom
+import "plugin/Model.js" as Model
 
 ShellRoot {
   id: shell
 
   property bool rowProbePassed: false
+  property var probeService: null
 
   QtObject {
     id: fakeBar
@@ -66,9 +68,14 @@ ShellRoot {
 
   Intercom.MessageRow {
     id: messageProbe
-    visible: false
+    visible: true
+    opacity: 0
+    width: 240
+    unread: shell.probeService
+      ? Model.messageUnread(shell.probeService.localReadState, "smoke", message)
+      : false
     message: ({
-      id: "1",
+      id: "m1",
       from: "Ada Lovelace",
       email: "ada@example.com",
       kind: "customer",
@@ -85,6 +92,48 @@ ShellRoot {
       if (!shell.rowProbePassed || widget.width <= 0 || messageProbe.implicitHeight <= 0 || pulseProbe.height !== 2 || !widget.opened) {
         console.error("intercom qml smoke failed", shell.rowProbePassed, widget.width, widget.opened, messageProbe.implicitHeight, pulseProbe.height)
         widget.close()
+        Qt.quit()
+        return
+      }
+      for (var i = 0; i < widget.children.length; i++) {
+        var child = widget.children[i]
+        if (typeof child.markMessageRead === "function") shell.probeService = child
+      }
+      var service = shell.probeService
+      if (!service) {
+        console.error("intercom qml smoke failed: missing service")
+        Qt.quit()
+        return
+      }
+      service.state = "ready"
+      service.workspaceId = "smoke"
+      service.localReadState = {}
+      widget.showingSettings = false
+      widget.expandConversationId = "smoke"
+      service.threadId = "smoke"
+      service.showThread({ id: "smoke", messages: [
+        { id: "m1", kind: "customer", body: "First unread message" },
+        { id: "m2", kind: "customer", body: "Second unread message" }
+      ] })
+      widget.pane = "list"
+      var dot = null
+      for (var j = 0; j < messageProbe.children.length; j++) {
+        if (messageProbe.children[j].objectName === "unreadDot") dot = messageProbe.children[j]
+      }
+      if (!dot || !dot.visible || dot.width <= 0 || !service.barUrgent) {
+        console.error("intercom qml smoke failed: unread message missing dot or tray urgency")
+        Qt.quit()
+        return
+      }
+      widget.selectThreadItem("message", "m1", 0)
+      if (dot.visible || !service.barUrgent || !Model.messageUnread(service.localReadState, "smoke", { id: "m2" })) {
+        console.error("intercom qml smoke failed: focusing first message did not clear only its dot")
+        Qt.quit()
+        return
+      }
+      widget.moveThreadFocus(1)
+      if (service.barUrgent || Model.messageUnread(service.localReadState, "smoke", { id: "m2" })) {
+        console.error("intercom qml smoke failed: focusing last unread message left tray urgent")
         Qt.quit()
         return
       }

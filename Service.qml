@@ -106,7 +106,6 @@ Item {
   readonly property string syncStatusPath: archiveDir === "" ? "" : archiveDir + "/status.json"
   readonly property string archiveIndexPath: archiveDir === "" ? "" : archiveDir + "/index.json"
   readonly property int refreshIntervalMs: intSetting("refreshIntervalSec", 60, 15, 3600) * 1000
-  readonly property int maxConversations: intSetting("maxConversations", 20, 5, 150)
   readonly property string tokenFile: String(setting("tokenFile", "")).trim()
   readonly property bool networkActive: loading || openLoading || messagesLoading
     || prefetchProcess.running || replying || closing || reopening
@@ -145,7 +144,7 @@ Item {
   }
 
   function fetchCommand() {
-    return withTokenFile([root.pluginRoot + "/intercom-fetch", "--limit", String(root.maxConversations)])
+    return withTokenFile([root.pluginRoot + "/intercom-fetch", "--limit", "150"])
   }
 
   function inboxCommand(source) {
@@ -154,7 +153,7 @@ Item {
       "--inbox",
       Model.inboxFetchFilter(source || inboxFilter),
       "--limit",
-      String(root.maxConversations)
+      "150"
     ])
   }
 
@@ -352,10 +351,13 @@ Item {
     return hasNew
   }
 
-  function markDisplayedMessagesRead(conversationId) {
+  function markMessageRead(conversationId, index) {
     var id = String(conversationId || "")
     if (id === "" || id !== String(threadId) || id !== String((thread || {}).id || "")) return
-    observeMessages(thread, true)
+    if (index < 0 || index >= messages.length) return
+    var msg = messages[index]
+    if (!Model.messageUnread(localReadState, id, msg)) return
+    observeMessages({ id: id, messages: [msg] }, true)
   }
 
   function refreshBarUrgent() {
@@ -1495,7 +1497,7 @@ Item {
 
   Timer {
     id: watchdog
-    interval: 25000
+    interval: 120000
     repeat: false
     onTriggered: {
       if (fetchProcess.running) fetchProcess.running = false
@@ -1721,7 +1723,7 @@ Item {
 
   Timer {
     id: inboxWatchdog
-    interval: 25000
+    interval: 120000
     repeat: false
     onTriggered: {
       if (inboxProcess.running) inboxProcess.running = false

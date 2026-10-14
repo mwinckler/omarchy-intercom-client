@@ -9,6 +9,8 @@ BorderSurface {
 
   property var message: ({})
   property bool selected: false
+  property bool unread: false
+  property color unreadColor: Color.urgent
   property color foreground: Color.foreground
   property color accent: Color.accent
   property string fontFamily: Style.font.family
@@ -36,6 +38,18 @@ BorderSurface {
     ? Border.controlSpec("normal", foreground, accent)
     : Border.flat(alpha(note ? foreground : (teammate ? accent : foreground), note || teammate ? 0.22 : 0.13), 1)
   radius: Style.cornerRadius
+
+  Rectangle {
+    objectName: "unreadDot"
+    visible: root.unread
+    x: Style.space(3)
+    y: Style.space(3)
+    width: Style.space(7)
+    height: width
+    radius: width / 2
+    color: root.unreadColor
+    z: 1
+  }
 
   HoverHandler {
     id: hoverHandler
