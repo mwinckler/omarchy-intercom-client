@@ -8,6 +8,42 @@ const model = { console, Date, JSON, Object, Array, Number, String, Math, isFini
 vm.createContext(model);
 vm.runInContext(source, model, { filename: "Model.js" });
 
+const firstMessage = { id: "m1", kind: "customer", createdAt: 100, body: "Hello" };
+const secondMessage = { id: "m2", kind: "customer", createdAt: 100, body: "Follow-up" };
+const localThread = { id: "local", waitingSince: 100, messages: [firstMessage] };
+let localReads = model.updateLocalReadState({}, localThread, false);
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 1);
+localReads = model.updateLocalReadState(localReads, localThread, true);
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 0);
+// A follow-up is unread even when Intercom's waiting timestamp has not changed.
+localReads = model.updateLocalReadState(localReads, { ...localThread, messages: [firstMessage, secondMessage] }, false);
+assert.equal(localReads.local.$m1, true);
+assert.equal(localReads.local.$m2, false);
+// A stale displayed thread cannot acknowledge a message it doesn't contain.
+localReads = model.updateLocalReadState(localReads, localThread, true);
+assert.equal(localReads.local.$m2, false);
+// Disappearing from the waiting list / being closed doesn't discard unread state.
+localReads = model.updateLocalReadState(localReads, { id: "local", state: "closed", messages: [] }, false);
+assert.equal(localReads.local.$m2, false);
+const restoredReads = model.parseDiskCache(model.serializeDiskCache({
+  state: "ready", localReadState: localReads
+})).localReadState;
+assert.equal(restoredReads.local.$m1, true);
+assert.equal(restoredReads.local.$m2, false);
+localReads = model.updateLocalReadState(restoredReads, { ...localThread, messages: [secondMessage] }, true);
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 0);
+localReads = model.updateLocalReadState(localReads, { id: "local", messages: [
+  { id: "mine", kind: "teammate", email: "me@example.com", body: "My reply" },
+  { id: "note", kind: "note", email: "me@example.com", body: "My note" }
+] }, false, "me@example.com");
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 0);
+localReads = model.updateLocalReadState(localReads, { id: "local", messages: [
+  { id: "other", kind: "teammate", email: "other@example.com", body: "Another teammate" }
+] }, false, "me@example.com");
+assert.equal(localReads.local.$other, false);
+assert.equal(JSON.stringify(model.normalizeLocalReadState({ bad: { "$m": "false", "$n": false } })),
+  JSON.stringify({ bad: { "$n": false } }));
+
 const empty = model.parseFetch("");
 assert.equal(empty.state, "error");
 assert.equal(empty.waitingCount, 0);

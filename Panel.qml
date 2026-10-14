@@ -270,6 +270,7 @@ Panel {
     if (id !== "") intercom.saveViewed(id)
     if (expandConversationId !== "") intercom.loadThread(expandConversationId)
     scrollThreadToEnd()
+    Qt.callLater(root.acknowledgeDisplayedConversation)
   }
 
   function expandConversation(conversation) {
@@ -290,6 +291,7 @@ Panel {
       intercom.loadThread(expandConversationId)
     ensureInboxCursor()
     scrollThreadToEnd()
+    Qt.callLater(root.acknowledgeDisplayedConversation)
     if (scrollPendingSelection && inboxConversations.length > 0) {
       scrollPendingSelection = false
       scrollInboxIntoView()
@@ -616,8 +618,8 @@ Panel {
 
   function acknowledgeDisplayedConversation() {
     var id = root.displayedConversationId()
-    if (id === "") return
-    intercom.clearPendingUrgent(id)
+    if (id === "" || !root.panelHasKeyboardFocus() || !root.showingSelectedThread) return
+    intercom.markDisplayedMessagesRead(id)
   }
 
   function refreshNow() {
@@ -740,6 +742,7 @@ Panel {
     intercom.saveViewed(id)
     intercom.loadThread(id)
     root.scrollThreadToEnd()
+    Qt.callLater(root.acknowledgeDisplayedConversation)
     root.prefetchVisibleThreads()
   }
 
@@ -1350,6 +1353,7 @@ Panel {
         } else {
           keyCatcher.forceActiveFocus()
         }
+        root.acknowledgeDisplayedConversation()
       })
     } else {
       compositorFocusLost = false
@@ -1373,11 +1377,11 @@ Panel {
     }
     onMessagesChanged: {
       if (root.opened && root.pinThreadToEnd) root.scrollThreadToEnd()
+      Qt.callLater(root.acknowledgeDisplayedConversation)
     }
     onNewWaitingMessages: function(conversations) {
       var id = root.displayedConversationId()
       if (id === "" || !Model.findConversationById(conversations, id)) return
-      root.acknowledgeDisplayedConversation()
       root.scrollThreadToEnd()
     }
     onTokenSaved: {
@@ -1450,6 +1454,7 @@ Panel {
 
   function stealPanelFocus() {
     root.compositorFocusLost = false
+    Qt.callLater(root.acknowledgeDisplayedConversation)
     if (panel) {
       panel.focusPrimed = false
       if (typeof panel.beginFocusPrime === "function") panel.beginFocusPrime()
@@ -1548,9 +1553,17 @@ Panel {
       root.barCountsPending ? 0 : intercom.openCount,
       root.vertical)
     labelVisible: !root.barCountsPending
-    active: intercom.barUrgent
+    property bool flashOn: true
+    active: intercom.barUrgent && flashOn
     dimmed: false
     activeColor: Color.urgent
+    Timer {
+      interval: 500
+      repeat: true
+      running: intercom.barUrgent
+      onRunningChanged: button.flashOn = true
+      onTriggered: button.flashOn = !button.flashOn
+    }
     tooltipText: Model.tooltipText(
       intercom.waitingCount,
       intercom.openCount,

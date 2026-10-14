@@ -878,7 +878,8 @@ function emptyDiskCache() {
     adminEmail: "",
     conversations: [],
     inboxes: {},
-    threads: {}
+    threads: {},
+    localReadState: {}
   }
 }
 
@@ -919,7 +920,8 @@ function parseDiskCache(raw) {
     adminEmail: textValue(waiting.adminEmail, textValue(parsed.adminEmail)),
     conversations: conversations,
     inboxes: parseInboxCache(parsed.inboxes),
-    threads: parseThreadCache(parsed.threads)
+    threads: parseThreadCache(parsed.threads),
+    localReadState: normalizeLocalReadState(parsed.localReadState)
   }
 }
 
@@ -947,7 +949,8 @@ function serializeDiskCache(snapshot) {
       conversations: conversations
     },
     inboxes: parseInboxCache(row.inboxes),
-    threads: parseThreadCache(row.threads)
+    threads: parseThreadCache(row.threads),
+    localReadState: normalizeLocalReadState(row.localReadState)
   }
   return JSON.stringify(payload)
 }
@@ -1177,6 +1180,54 @@ function copyIdMap(value) {
     next[key] = source[key]
   }
   return next
+}
+
+// Message identities, not Intercom's read/waiting flags, determine local unread state.
+function normalizeLocalReadState(value) {
+  var source = copyIdMap(value)
+  var next = {}
+  for (var id in source) {
+    var messages = objectValue(source[id])
+    var copy = {}
+    for (var key in messages) {
+      if (!Object.prototype.hasOwnProperty.call(messages, key) || key.charAt(0) !== "$") continue
+      if (typeof messages[key] === "boolean") copy[key] = messages[key]
+    }
+    next[id] = copy
+  }
+  return next
+}
+
+function updateLocalReadState(value, conversation, read, ownEmail) {
+  var next = normalizeLocalReadState(value)
+  var conv = normalizeConversation(conversation)
+  if (!isSafeConversationId(conv.id)) return next
+  var known = objectValue(next[conv.id])
+  var email = textValue(ownEmail).trim().toLowerCase()
+  for (var i = 0; i < conv.messages.length; i++) {
+    var msg = conv.messages[i]
+    // Sending our own reply or note must not create an unread alert.
+    if (email !== "" && (msg.kind === "teammate" || msg.kind === "note")
+        && msg.email.trim().toLowerCase() === email) continue
+    var key = "$" + (msg.id || JSON.stringify([msg.createdAt, msg.kind, msg.from, msg.body]))
+    if (read || !Object.prototype.hasOwnProperty.call(known, key)) known[key] = !!read
+  }
+  next[conv.id] = known
+  return next
+}
+
+function localUnreadConversations(value) {
+  var source = normalizeLocalReadState(value)
+  var pending = {}
+  for (var id in source) {
+    for (var key in source[id]) {
+      if (source[id][key] === false) {
+        pending[id] = true
+        break
+      }
+    }
+  }
+  return pending
 }
 
 function addPendingUrgent(pending, conversations) {

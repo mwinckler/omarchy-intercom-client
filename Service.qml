@@ -63,6 +63,7 @@ Item {
   property string lastViewedId: ""
   property bool viewedLoaded: false
   property var pendingUrgent: ({})
+  property var localReadState: ({})
   property bool barUrgent: false
   property bool prefsQueued: false
   property var seenConversations: ({})
@@ -253,8 +254,6 @@ Item {
     var toNotify = Model.notificationsToSend(seenConversations, current, Model.notificationLimit())
     seenConversations = Model.conversationIndex(current)
     if (news.length) {
-      pendingUrgent = Model.addPendingUrgent(pendingUrgent, news)
-      refreshBarUrgent()
       threadCache = Model.expireCachedThreads(threadCache, news)
       schedulePersistCache()
       var currentId = String(threadId || "")
@@ -334,13 +333,29 @@ Item {
     if (!Model.isSafeConversationId(id)) return
     lastViewedId = id
     viewedLoaded = true
-    clearPendingUrgent(id)
     savePrefs()
   }
 
-  function clearPendingUrgent(conversationId) {
-    pendingUrgent = Model.clearPendingUrgent(pendingUrgent, conversationId)
+  function observeMessages(conversation, read) {
+    var id = String((conversation || {}).id || "")
+    var previous = (localReadState || {})[id] || {}
+    var next = Model.updateLocalReadState(localReadState, conversation, !!read, adminEmail)
+    var observed = next[id] || {}
+    var hasNew = false
+    for (var key in observed) {
+      if (observed[key] === false && !Object.prototype.hasOwnProperty.call(previous, key)) hasNew = true
+    }
+    localReadState = next
+    pendingUrgent = Model.localUnreadConversations(localReadState)
     refreshBarUrgent()
+    schedulePersistCache()
+    return hasNew
+  }
+
+  function markDisplayedMessagesRead(conversationId) {
+    var id = String(conversationId || "")
+    if (id === "" || id !== String(threadId) || id !== String((thread || {}).id || "")) return
+    observeMessages(thread, true)
   }
 
   function refreshBarUrgent() {
@@ -484,7 +499,8 @@ Item {
       adminEmail: adminEmail,
       conversations: conversations,
       inboxes: inboxCache,
-      threads: threadCache
+      threads: threadCache,
+      localReadState: localReadState
     }
   }
 
@@ -548,6 +564,9 @@ Item {
       message = "No conversations are waiting for a reply."
     threadCache = row.threads || {}
     inboxCache = row.inboxes || {}
+    localReadState = Model.normalizeLocalReadState(row.localReadState)
+    pendingUrgent = Model.localUnreadConversations(localReadState)
+    refreshBarUrgent()
     seenConversations = Model.conversationIndex(conversations)
     seenSeeded = true
     showCachedInbox()
@@ -661,12 +680,15 @@ Item {
     var cache = threadCache
     var currentId = String(threadId || "")
     var shown = null
+    var refreshCurrent = false
     for (var i = 0; i < list.length; i++) {
       var conv = list[i] || {}
       if (String(conv.id || "") === "") continue
       if (!(conv.messages || []).length) continue
+      var hasNew = observeMessages(conv, false)
       var existing = Model.readCachedThread(cache, conv.id)
-      if (existing && existing.complete) continue
+      if (existing && existing.complete && !hasNew) continue
+      if (hasNew && String(conv.id) === currentId) refreshCurrent = true
       cache = Model.writeCachedThread(cache, conv, now, false)
       if (!shown && String(conv.id) === currentId && messages.length === 0 && String(loadingThreadId || "") !== currentId)
         shown = conv
@@ -674,10 +696,16 @@ Item {
     threadCache = cache
     if (shown)
       showThread(shown)
+    // Follow-ups can arrive without changing Intercom's waiting timestamp.
+    if (refreshCurrent)
+      Qt.callLater(function() {
+        if (String(root.threadId || "") === currentId) root.loadThread(currentId, true)
+      })
   }
 
   function showThread(conv) {
     var row = conv || {}
+    observeMessages(row, false)
     var source = row.messages || []
     var copy = []
     for (var i = 0; i < source.length; i++)
@@ -767,6 +795,7 @@ Item {
     var failed = parsed.state === "error" || parsed.state === "unconfigured"
     var convId = String(conv.id || "")
     if (!failed && convId !== "") {
+      observeMessages(conv, false)
       threadCache = Model.writeCachedThread(threadCache, conv, Date.now())
       schedulePersistCache()
       fetchedId = convId
@@ -877,6 +906,7 @@ Item {
     var existing = convId !== "" ? cachedThread(convId) : null
     var stale = Model.prefetchResultStale(existing, prefetchStartedAt)
     if (!failed && convId !== "" && !stale) {
+      observeMessages(conv, false)
       threadCache = Model.writeCachedThread(threadCache, conv, Date.now())
       schedulePersistCache()
       fetchedId = convId
@@ -1007,6 +1037,7 @@ Item {
     seenConversations = {}
     seenSeeded = false
     pendingUrgent = ({})
+    localReadState = ({})
     barUrgent = false
     replyMessage = ""
     closing = false
@@ -1143,8 +1174,6 @@ Item {
     conversations = Model.removeConversation(conversations, id)
     syncInboxCaches(row, "closed", previous)
     applyVisibleInboxAfterStateChange(row, "closed")
-    pendingUrgent = Model.clearPendingUrgent(pendingUrgent, id)
-    refreshBarUrgent()
     schedulePersistCache()
   }
 
