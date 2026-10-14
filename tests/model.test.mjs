@@ -687,16 +687,8 @@ assert.equal(JSON.stringify(model.queuedThreadAfterInFlight("1295", "", false, "
 assert.equal(JSON.stringify(model.queuedThreadAfterInFlight("1295", "queued", false, "other", false)), JSON.stringify({ id: "other", force: false }));
 
 assert.equal(model.pendingUrgentCount({}), 0);
-assert.equal(JSON.stringify(model.addPendingUrgent({}, [
-  { id: "a", waitingSince: 9 },
-  { id: "b", waitingSince: 4 }
-])), JSON.stringify({ a: 9, b: 4 }));
-assert.equal(model.pendingUrgentCount(model.addPendingUrgent({ a: 1 }, [
-  { id: "b", waitingSince: 2 }
-])), 2);
-assert.equal(JSON.stringify(model.clearPendingUrgent({ a: 9, b: 4 }, "a")), JSON.stringify({ b: 4 }));
-assert.equal(model.pendingUrgentCount(model.clearPendingUrgent({ a: 9 }, "a")), 0);
-assert.equal(JSON.stringify(model.addPendingUrgent({}, [{ id: "../x", waitingSince: 1 }])), "{}");
+assert.equal(model.pendingUrgentCount({ a: true, b: true }), 2);
+assert.equal(model.pendingUrgentCount({ "../x": true }), 0);
 
 assert.equal(model.parseDiskCache("").ready, false);
 assert.equal(model.parseDiskCache("not-json").ready, false);

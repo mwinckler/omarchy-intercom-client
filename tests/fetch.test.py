@@ -245,7 +245,7 @@ class FetchTests(unittest.TestCase):
         )
         self.assertEqual(parsed["conversations"][0]["messages"][0]["body"], "Hi")
 
-    def test_latest_preview_uses_last_comment(self):
+    def test_conversation_identity_uses_last_comment(self):
         conv = {
             "created_at": 100,
             "source": {
@@ -293,9 +293,6 @@ class FetchTests(unittest.TestCase):
                 ],
             },
         }
-        sender, snippet = FETCH.latest_preview(conv)
-        self.assertEqual(sender, "Ada Lovelace")
-        self.assertEqual(snippet, "Newest question")
         self.assertEqual(FETCH.conversation_identity(conv), (
             "Ada Lovelace",
             "ada@example.com",
@@ -338,7 +335,7 @@ class FetchTests(unittest.TestCase):
                 ]
             },
         }
-        self.assertEqual(FETCH.latest_preview(assigned_reply), ("Bo", "On it, assigned to me."))
+        self.assertEqual(FETCH.conversation_identity(assigned_reply), ("Bo", "", "On it, assigned to me."))
         self.assertEqual(
             [row["kind"] for row in FETCH.extract_messages(assigned_reply)],
             ["customer", "teammate"],
@@ -372,8 +369,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(fields, {"state"})
         self.assertEqual(closed["sort"]["field"], "updated_at")
         self.assertEqual(closed["pagination"]["per_page"], 20)
-        recent = FETCH.search_state_body("closed", 20, now=1_700_000_000)
-        self.assertEqual(recent["query"]["value"], [{"field": "state", "operator": "=", "value": "closed"}])
+        self.assertEqual(closed["query"]["value"], [{"field": "state", "operator": "=", "value": "closed"}])
         count_only = FETCH.search_inbox_body("closed", 1)
         count_fields = {item["field"] for item in count_only["query"]["value"] if isinstance(item, dict)}
         self.assertEqual(count_fields, {"state"})
@@ -562,7 +558,7 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(FETCH.parse_args(["--search", "billing", "--remote"]).remote)
         self.assertEqual(FETCH.parse_args(["--search", "billing"]).search, "billing")
 
-    def test_parse_open_search_skips_snoozed_and_sorts_recent(self):
+    def test_parse_inbox_search_open_skips_snoozed_and_sorts_recent(self):
         payload = {
             "total_count": 4,
             "conversations": [
@@ -597,7 +593,7 @@ class FetchTests(unittest.TestCase):
                 },
             ],
         }
-        parsed = FETCH.parse_open_search(payload, "US", "ws", 20)
+        parsed = FETCH.parse_inbox_search(payload, "US", "ws", 20, "open")
         self.assertEqual([row["id"] for row in parsed["conversations"]], ["new", "old"])
         self.assertEqual(parsed["conversations"][0]["updatedAt"], 300)
         self.assertEqual(parsed["conversations"][0]["from"], "Bo")
@@ -714,7 +710,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in mixed["conversations"]], ["later", "open", "done"])
         self.assertEqual(mixed["inboxCount"], 3)
 
-    def test_parse_open_search_uses_latest_parts(self):
+    def test_parse_inbox_search_open_uses_latest_parts(self):
         payload = {
             "total_count": 1,
             "conversations": [
@@ -743,7 +739,7 @@ class FetchTests(unittest.TestCase):
                 }
             ],
         }
-        parsed = FETCH.parse_open_search(payload, "US", "ws", 20)
+        parsed = FETCH.parse_inbox_search(payload, "US", "ws", 20, "open")
         row = parsed["conversations"][0]
         self.assertEqual(row["from"], "Bo")
         self.assertEqual(row["email"], "bo@example.com")
@@ -912,7 +908,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(thread["id"], "9")
         self.assertEqual(thread["state"], "open")
         self.assertEqual(len(thread["messages"]), 6)
-        self.assertEqual(FETCH.latest_preview(conv), ("Bo", "Closing this out."))
+        self.assertEqual(FETCH.conversation_identity(conv), ("Bo", "", "Closing this out."))
 
     def test_permission_errors(self):
         missing = FETCH.ApiError(
@@ -978,21 +974,21 @@ class FetchTests(unittest.TestCase):
         panel_args = FETCH.parse_args(["--panel", "expanded"])
         self.assertEqual(panel_args.panel, "expanded")
 
-    def test_save_panel_persists_in_config(self):
+    def test_save_prefs_persists_in_config(self):
         self.assertEqual(FETCH.panel_mode(""), "expanded")
         self.assertEqual(FETCH.panel_mode("expanded"), "expanded")
         self.assertEqual(FETCH.panel_mode("large"), "large")
         self.assertEqual(FETCH.panel_mode("LARGE"), "large")
         self.assertEqual(FETCH.panel_mode("COMPACT"), "expanded")
-        result = FETCH.save_panel("expanded")
+        result = FETCH.save_prefs(panel="expanded")
         self.assertEqual(result["state"], "saved")
         self.assertEqual(result["panel"], "expanded")
         self.assertEqual(FETCH.load_config().get("panel"), "expanded")
         self.assertEqual(FETCH.panel_mode(), "expanded")
-        large = FETCH.save_panel("large")
+        large = FETCH.save_prefs(panel="large")
         self.assertEqual(large["panel"], "large")
         self.assertEqual(FETCH.load_config().get("panel"), "large")
-        compact = FETCH.save_panel("compact")
+        compact = FETCH.save_prefs(panel="compact")
         self.assertEqual(compact["panel"], "expanded")
         self.assertEqual(FETCH.load_config().get("panel"), "expanded")
         with open(FETCH.config_path(), "w", encoding="utf-8") as handle:
@@ -1138,13 +1134,13 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(note["body"], "<i>Private</i>")
         self.assertEqual(FETCH.admin_reply_body("9912", "Hi", "NOTE")["message_type"], "note")
         self.assertEqual(FETCH.admin_reply_body("9912", "Hi", "comment")["message_type"], "comment")
-        close_body = FETCH.admin_close_body("9912")
+        close_body = FETCH.admin_part_body("9912", "close")
         self.assertEqual(close_body, {
             "message_type": "close",
             "type": "admin",
             "admin_id": "9912",
         })
-        self.assertEqual(FETCH.admin_open_body("9912"), {
+        self.assertEqual(FETCH.admin_part_body("9912", "open"), {
             "message_type": "open",
             "type": "admin",
             "admin_id": "9912",

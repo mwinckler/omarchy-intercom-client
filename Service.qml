@@ -76,11 +76,7 @@ Item {
   property string syncState: ""
   property string syncMessage: ""
   property int syncScanned: 0
-  property int syncStored: 0
-  property int syncSkipped: 0
-  property int syncFailed: 0
   property int syncTotal: 0
-  property double syncAt: 0
   property var archiveIndex: ({})
   property bool searching: false
   property bool searchRemoteActive: false
@@ -1336,11 +1332,7 @@ Item {
     syncState = parsed.state
     syncMessage = parsed.message
     syncScanned = parsed.scanned
-    syncStored = parsed.stored
-    syncSkipped = parsed.skipped
-    syncFailed = parsed.failed
     syncTotal = parsed.total
-    if (parsed.syncedAt > 0) syncAt = parsed.syncedAt
     if (parsed.state === "syncing" && !syncProcess.running && !syncing) {
       syncState = "error"
       syncMessage = "Archive sync was interrupted."
@@ -1365,11 +1357,7 @@ Item {
       syncState = parsed.state
       if (parsed.message !== "") syncMessage = parsed.message
       if (parsed.scanned > 0) syncScanned = parsed.scanned
-      if (parsed.stored > 0) syncStored = parsed.stored
-      if (parsed.skipped > 0) syncSkipped = parsed.skipped
-      if (parsed.failed > 0) syncFailed = parsed.failed
       if (parsed.total > 0) syncTotal = parsed.total
-      if (parsed.syncedAt > 0) syncAt = parsed.syncedAt
     } else if (exitCode !== 0) {
       syncState = "error"
       if (syncMessage === "" || parsed.state === "syncing" || parsed.state === "")
@@ -1384,7 +1372,6 @@ Item {
     syncState = "syncing"
     syncMessage = "Starting archive sync…"
     _syncStdout = ""
-    _syncStderr = ""
     syncProcess.command = syncCommand()
     syncProcess.running = true
     syncWatchdog.restart()
@@ -1475,7 +1462,6 @@ Item {
   property string _stateChangeId: ""
   property string _stateChangeAction: ""
   property string _syncStdout: ""
-  property string _syncStderr: ""
   property string _searchStdout: ""
   property string _searchStderr: ""
   property string _inboxStdout: ""
@@ -1514,7 +1500,6 @@ Item {
       onStreamFinished: root._stdout = text
     }
     stderr: StdioCollector {
-      id: fetchStderr
       waitForEnd: true
       onStreamFinished: root._stderr = text
     }
@@ -1673,7 +1658,6 @@ Item {
       onStreamFinished: root._replyStdout = text
     }
     stderr: StdioCollector {
-      id: replyStderr
       waitForEnd: true
       onStreamFinished: root._replyStderr = text
     }
@@ -1708,7 +1692,6 @@ Item {
       onStreamFinished: root._closeStdout = text
     }
     stderr: StdioCollector {
-      id: closeStderr
       waitForEnd: true
       onStreamFinished: root._closeStderr = text
     }
@@ -1740,7 +1723,6 @@ Item {
       onStreamFinished: root._inboxStdout = text
     }
     stderr: StdioCollector {
-      id: inboxStderr
       waitForEnd: true
       onStreamFinished: root._inboxStderr = text
     }
@@ -1777,7 +1759,6 @@ Item {
       onStreamFinished: root._threadStdout = text
     }
     stderr: StdioCollector {
-      id: threadStderr
       waitForEnd: true
       onStreamFinished: root._threadStderr = text
     }
@@ -1814,7 +1795,6 @@ Item {
       onStreamFinished: root._prefetchStdout = text
     }
     stderr: StdioCollector {
-      id: prefetchStderr
       waitForEnd: true
       onStreamFinished: root._prefetchStderr = text
     }
@@ -1847,7 +1827,6 @@ Item {
   }
 
   Timer {
-    id: syncStatusPoll
     interval: 750
     repeat: true
     running: root.syncing && root.syncStatusPath !== ""
@@ -1863,11 +1842,7 @@ Item {
       waitForEnd: true
       onStreamFinished: root._syncStdout = text
     }
-    stderr: StdioCollector {
-      id: syncStderr
-      waitForEnd: true
-      onStreamFinished: root._syncStderr = text
-    }
+    stderr: StdioCollector { waitForEnd: true }
     onExited: function(exitCode) {
       syncWatchdog.stop()
       root.syncing = false
@@ -1915,7 +1890,6 @@ Item {
       onStreamFinished: root._searchStdout = text
     }
     stderr: StdioCollector {
-      id: searchStderr
       waitForEnd: true
       onStreamFinished: root._searchStderr = text
     }

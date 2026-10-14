@@ -195,14 +195,6 @@ Panel {
     })
   }
 
-  function scrollThread(delta) {
-    if (!threadFlick) return
-    pinThreadToEnd = false
-    var step = Style.space(48)
-    var maxY = Math.max(0, threadFlick.contentHeight - threadFlick.height)
-    threadFlick.contentY = Math.max(0, Math.min(maxY, threadFlick.contentY + delta * step))
-  }
-
   function applyThreadEndScroll() {
     if (!pinThreadToEnd || !threadFlick) return
     var maxY = Math.max(0, threadFlick.contentHeight - threadFlick.height)
@@ -1793,7 +1785,6 @@ Panel {
             readonly property bool signingOut: intercom.signingOut
             readonly property string adminName: intercom.adminName
             readonly property string adminEmail: intercom.adminEmail
-            readonly property string adminId: intercom.adminId
             readonly property color accentColor: root.accent
             readonly property color foregroundColor: root.foreground
             function toggleSettings() { root.toggleSettings() }
@@ -1828,7 +1819,6 @@ Panel {
                     showInitials: !header.settingsActive
                     adminName: header.adminName
                     adminEmail: header.adminEmail
-                    adminId: header.adminId
                     busy: header.signingOut
                     signingIn: intercom.signingIn
                     focusable: header.settingsActive
@@ -1867,7 +1857,6 @@ Panel {
           }
 
           BorderSurface {
-            id: setupBox
             visible: root.settingsOpen
             width: parent.width
             implicitHeight: setupColumn.implicitHeight + Style.space(20)
@@ -2126,7 +2115,6 @@ Panel {
       }
 
       Item {
-        id: expandedView
         visible: !root.settingsOpen
         anchors.fill: parent
 
@@ -2167,7 +2155,6 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               adminName: intercom.adminName
               adminEmail: intercom.adminEmail
-              adminId: intercom.adminId
               busy: intercom.signingOut
               signingIn: intercom.signingIn
               foreground: root.foreground
@@ -2863,7 +2850,6 @@ Panel {
     }
 
     NetworkPulse {
-      id: networkPulse
       z: 50
       anchors.top: parent.top
       anchors.topMargin: -panel.padding + 2
@@ -2902,7 +2888,6 @@ Panel {
 
     property string adminName: ""
     property string adminEmail: ""
-    property string adminId: ""
     property bool showInitials: true
     property bool busy: false
     property bool signingIn: false
@@ -2975,7 +2960,6 @@ Panel {
         }
 
         Button {
-          id: signInLink
           visible: !chip.hasProfile
           anchors.verticalCenter: parent.verticalCenter
           text: chip.signingIn ? "Signing in…" : "Sign in again"
@@ -2996,7 +2980,6 @@ Panel {
         }
 
         Button {
-          id: signOutLink
           anchors.verticalCenter: parent.verticalCenter
           text: chip.busy ? "Signing out…" : "Sign out"
           bordered: false
@@ -3154,7 +3137,6 @@ Panel {
       }
 
       Text {
-        id: glyph
         anchors.centerIn: parent
         text: "󰍡"
         color: mark.accent

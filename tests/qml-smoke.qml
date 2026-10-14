@@ -65,7 +65,6 @@ ShellRoot {
   }
 
   Intercom.ConversationRow {
-    id: rowProbe
     visible: false
     conversation: ({
       id: "1295",

@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -17,6 +16,7 @@ FocusScope {
 
   readonly property color dim: Qt.darker(foreground, 1.5)
   readonly property var parsed: {
+    // These reads make QML track the inputs used inside currentParse().
     var _text = root.scheduleText
     var _picker = root.usePicker
     var _year = root.selectedYear

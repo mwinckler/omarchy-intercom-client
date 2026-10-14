@@ -786,10 +786,6 @@ function normalizeConversationList(value) {
   return rows
 }
 
-function emptyInboxSnapshot() {
-  return { conversations: [], count: 0, fetchedAt: 0 }
-}
-
 function readInboxCache(cache, source) {
   var key = inboxSourceKey(source)
   var row = objectValue(objectValue(cache)[key])
@@ -1280,24 +1276,6 @@ function includeUnreadConversations(conversations, lists, readState) {
   }
   missing.sort(function(a, b) { return b.updatedAt - a.updatedAt })
   return missing.concat(rows)
-}
-
-function addPendingUrgent(pending, conversations) {
-  var next = copyIdMap(pending)
-  var source = arrayValue(conversations)
-  for (var i = 0; i < source.length; i++) {
-    var row = conversationFingerprint(source[i])
-    if (!isSafeConversationId(row.id)) continue
-    next[row.id] = row.waitingSince
-  }
-  return next
-}
-
-function clearPendingUrgent(pending, conversationId) {
-  var next = copyIdMap(pending)
-  var id = textValue(conversationId)
-  if (id !== "") delete next[id]
-  return next
 }
 
 function pendingUrgentCount(pending) {
@@ -1803,7 +1781,6 @@ function parseScheduleText(text, nowMs, options) {
     minute = 0
   }
 
-  var hasNamedDay = dayOffset !== null || weekday !== null || tonight
   var hasCalendar = month !== null && day !== null
   if (year !== null && !hasCalendar) return emptyScheduleParse("Could not understand that date.")
   if (hasCalendar && (month < 0 || month > 11 || day < 1 || day > 31))
@@ -1820,8 +1797,6 @@ function parseScheduleText(text, nowMs, options) {
     at = upcomingWeekdayMs(weekday, hour, minute, now, nextWeekday)
   } else if (dayOffset !== null) {
     at = localDateMs(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, hour, minute)
-  } else if (tonight || thisPeriod) {
-    at = localDateMs(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute)
   } else {
     at = localDateMs(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute)
   }
@@ -1841,10 +1816,6 @@ function parseScheduleText(text, nowMs, options) {
 
   if (at <= nowAt) return emptyScheduleParse("That time is in the past.")
   return okScheduleParse(at)
-}
-
-function dateKey(year, month, day) {
-  return Math.floor(numberValue(year, 0)) + "-" + pad2(Number(month) + 1) + "-" + pad2(day)
 }
 
 function weekdayOrder(weekStart) {
