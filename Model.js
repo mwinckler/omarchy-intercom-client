@@ -1211,6 +1211,18 @@ function messageUnread(value, conversationId, message) {
   return Object.prototype.hasOwnProperty.call(known, key) && known[key] === false
 }
 
+function markConversationRead(value, conversationId) {
+  var next = normalizeLocalReadState(value)
+  var id = textValue(conversationId)
+  if (!isSafeConversationId(id)) return next
+  var messages = objectValue(next[id])
+  for (var key in messages) {
+    if (Object.prototype.hasOwnProperty.call(messages, key)) messages[key] = true
+  }
+  next[id] = messages
+  return next
+}
+
 function updateLocalReadState(value, conversation, read, ownEmail) {
   var next = normalizeLocalReadState(value)
   var conv = normalizeConversation(conversation)

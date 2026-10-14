@@ -25,7 +25,7 @@ Panel {
   readonly property string sizeShortcutHint: root.large ? "e smaller" : "e larger"
   property bool showingSettings: false
   property bool composing: false
-  onComposingChanged: Qt.callLater(root.acknowledgeFocusedMessage)
+  onComposingChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
   property bool replyAsNote: false
   property string replyConversationId: ""
   property string pane: "list"
@@ -132,7 +132,7 @@ Panel {
   property string pendingCancelLabel: ""
   readonly property bool confirmOpen: root.cancelConfirmOpen
   readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen
-  onOverlayOpenChanged: Qt.callLater(root.acknowledgeFocusedMessage)
+  onOverlayOpenChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
 
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
 
@@ -270,6 +270,7 @@ Panel {
   }
 
   function selectInboxIndex(index) {
+    if (root.opened) root.compositorFocusLost = false
     var conversations = inboxConversations
     if (conversations.length === 0) {
       inboxCursorIndex = 0
@@ -283,10 +284,11 @@ Panel {
     root.keepReplyOnConversation(id)
     expandConversationId = id
     pinViewedSelection = false
+    root.acknowledgeHighlightedConversation()
     if (id !== "") intercom.saveViewed(id)
     if (expandConversationId !== "") intercom.loadThread(expandConversationId)
     scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeFocusedMessage)
+    Qt.callLater(root.acknowledgeHighlightedConversation)
   }
 
   function expandConversation(conversation) {
@@ -298,6 +300,7 @@ Panel {
     var id = String(conv.id || "")
     root.keepReplyOnConversation(id)
     expandConversationId = id
+    root.acknowledgeHighlightedConversation()
     if (id !== "") intercom.saveViewed(id)
     pane = "list"
     if (inboxFlick) inboxFlick.contentY = 0
@@ -307,7 +310,7 @@ Panel {
       intercom.loadThread(expandConversationId)
     ensureInboxCursor()
     scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeFocusedMessage)
+    Qt.callLater(root.acknowledgeHighlightedConversation)
     if (scrollPendingSelection && inboxConversations.length > 0) {
       scrollPendingSelection = false
       scrollInboxIntoView()
@@ -443,14 +446,14 @@ Panel {
       root.keepReplyOnConversation(wanted)
       if (String(intercom.threadId || "") !== wanted)
         intercom.loadThread(wanted)
-      root.acknowledgeFocusedMessage()
+      root.acknowledgeHighlightedConversation()
       return
     }
     inboxCursorIndex = selection.index
     root.keepReplyOnConversation(selection.id)
     if (String(intercom.threadId || "") !== expandConversationId)
       intercom.loadThread(expandConversationId)
-    root.acknowledgeFocusedMessage()
+    root.acknowledgeHighlightedConversation()
   }
 
   function applyInboxFilter() {
@@ -632,14 +635,10 @@ Panel {
     return String(root.expandConversationId || "").trim()
   }
 
-  function acknowledgeFocusedMessage() {
+  function acknowledgeHighlightedConversation() {
     var id = root.displayedConversationId()
-    if (id === "" || !root.panelHasKeyboardFocus() || !root.showingSelectedThread
-        || root.pane !== "thread" || root.composing || root.overlayOpen) return
-    var items = root.threadFocusList
-    if (threadFocusIndex < 0 || threadFocusIndex >= items.length) return
-    var item = items[threadFocusIndex] || {}
-    if (item.kind === "message") intercom.markMessageRead(id, item.index)
+    if (id === "" || !root.panelHasKeyboardFocus() || root.overlayOpen) return
+    intercom.markConversationRead(id)
   }
 
   function refreshNow() {
@@ -678,7 +677,7 @@ Panel {
     intercom.searchMessage = ""
     if (String(expandConversationId || "") !== "") intercom.loadThread(expandConversationId)
     else root.syncInboxSelection()
-    root.acknowledgeFocusedMessage()
+    root.acknowledgeHighlightedConversation()
     Qt.callLater(function() {
       if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
     })
@@ -753,16 +752,18 @@ Panel {
   }
 
   function selectSearchHit(conversation) {
+    if (root.opened) root.compositorFocusLost = false
     var conv = conversation || selectedSearchConversation() || {}
     var id = String(conv.id || "")
     if (id === "") return
     root.keepReplyOnConversation(id)
     expandConversationId = id
     pinViewedSelection = false
+    root.acknowledgeHighlightedConversation()
     intercom.saveViewed(id)
     intercom.loadThread(id)
     root.scrollThreadToEnd()
-    Qt.callLater(root.acknowledgeFocusedMessage)
+    Qt.callLater(root.acknowledgeHighlightedConversation)
     root.prefetchVisibleThreads()
   }
 
@@ -992,7 +993,7 @@ Panel {
     )
     threadFocusIndex = resolved.index
     threadFocusKey = resolved.key
-    Qt.callLater(root.acknowledgeFocusedMessage)
+    Qt.callLater(root.acknowledgeHighlightedConversation)
   }
 
   function ensureThreadFocus() {
@@ -1004,7 +1005,7 @@ Panel {
     var next = Model.moveThreadFocus(root.threadFocusList, threadFocusKey, threadFocusIndex, delta)
     threadFocusIndex = next.index
     threadFocusKey = next.key
-    root.acknowledgeFocusedMessage()
+    root.acknowledgeHighlightedConversation()
     pinThreadToEnd = false
     root.scrollThreadFocusIntoView()
   }
@@ -1037,7 +1038,7 @@ Panel {
           && String(item.id || "") !== wantedId) continue
       threadFocusIndex = i
       threadFocusKey = String(item.key || "")
-      root.acknowledgeFocusedMessage()
+      root.acknowledgeHighlightedConversation()
       root.scrollThreadFocusIntoView()
       return
     }
@@ -1379,7 +1380,7 @@ Panel {
         } else {
           keyCatcher.forceActiveFocus()
         }
-        root.acknowledgeFocusedMessage()
+        root.acknowledgeHighlightedConversation()
       })
     } else {
       compositorFocusLost = false
@@ -1403,8 +1404,9 @@ Panel {
     }
     onMessagesChanged: {
       if (root.opened && root.pinThreadToEnd) root.scrollThreadToEnd()
-      Qt.callLater(root.acknowledgeFocusedMessage)
+      Qt.callLater(root.acknowledgeHighlightedConversation)
     }
+    onPendingUrgentChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
     onNewWaitingMessages: function(conversations) {
       var id = root.displayedConversationId()
       if (id === "" || !Model.findConversationById(conversations, id)) return
@@ -1480,7 +1482,7 @@ Panel {
 
   function stealPanelFocus() {
     root.compositorFocusLost = false
-    Qt.callLater(root.acknowledgeFocusedMessage)
+    Qt.callLater(root.acknowledgeHighlightedConversation)
     if (panel) {
       panel.focusPrimed = false
       if (typeof panel.beginFocusPrime === "function") panel.beginFocusPrime()
@@ -1519,7 +1521,7 @@ Panel {
     }
     function status(): string {
       return JSON.stringify({
-        implementationVersion: 3,
+        implementationVersion: 4,
         state: intercom.state,
         waitingCount: intercom.waitingCount,
         openCount: intercom.openCount,

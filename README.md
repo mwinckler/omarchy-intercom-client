@@ -110,8 +110,9 @@ US, EU, and AU API hosts are tried automatically. The region that succeeds is ca
   and a preview; clicking it opens this widget expanded on that conversation.
 - The bar icon flashes while any fetched messages remain unread locally and stops
   when none remain. Unread message cards have a dot in their upper-left corner.
-  Focusing a message with the keyboard or clicking its card marks only that message
-  read; merely opening its conversation does not. Read
+  Highlighting a conversation in the list (by keyboard or click) marks all its
+  messages read, without needing to focus the right-hand pane. Messages loaded
+  while that conversation remains highlighted in the focused panel are also read. Read
   status survives restarts in `~/.config/omarchy/intercom-notifier/cache.json` and
   is independent of Intercom's read status; background fetching or closing a
   conversation does not mark it read. Your own replies and notes are excluded.

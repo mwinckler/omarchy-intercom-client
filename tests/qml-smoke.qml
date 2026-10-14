@@ -97,7 +97,7 @@ ShellRoot {
       }
       for (var i = 0; i < widget.children.length; i++) {
         var child = widget.children[i]
-        if (typeof child.markMessageRead === "function") shell.probeService = child
+        if (typeof child.markConversationRead === "function") shell.probeService = child
       }
       var service = shell.probeService
       if (!service) {
@@ -109,12 +109,17 @@ ShellRoot {
       service.workspaceId = "smoke"
       service.localReadState = {}
       widget.showingSettings = false
+      widget.compositorFocusLost = true
       widget.expandConversationId = "smoke"
       service.threadId = "smoke"
       service.showThread({ id: "smoke", messages: [
         { id: "m1", kind: "customer", body: "First unread message" },
         { id: "m2", kind: "customer", body: "Second unread message" }
       ] })
+      service.observeMessages({ id: "other", messages: [
+        { id: "m3", kind: "customer", body: "Unread in another conversation" }
+      ] }, false)
+      service.openConversations = [{ id: "smoke", state: "open" }, { id: "other", state: "open" }]
       widget.pane = "list"
       var dot = null
       for (var j = 0; j < messageProbe.children.length; j++) {
@@ -125,15 +130,27 @@ ShellRoot {
         Qt.quit()
         return
       }
-      widget.selectThreadItem("message", "m1", 0)
-      if (dot.visible || !service.barUrgent || !Model.messageUnread(service.localReadState, "smoke", { id: "m2" })) {
-        console.error("intercom qml smoke failed: focusing first message did not clear only its dot")
+      widget.selectInboxIndex(0)
+      if (dot.visible || !service.barUrgent || Model.messageUnread(service.localReadState, "smoke", { id: "m2" })
+          || !Model.messageUnread(service.localReadState, "other", { id: "m3" }) || widget.pane !== "list") {
+        console.error("intercom qml smoke failed: highlighting conversation did not mark all and only its messages read")
         Qt.quit()
         return
       }
-      widget.moveThreadFocus(1)
-      if (service.barUrgent || Model.messageUnread(service.localReadState, "smoke", { id: "m2" })) {
-        console.error("intercom qml smoke failed: focusing last unread message left tray urgent")
+      service.showThread({ id: "smoke", messages: [
+        { id: "m1", kind: "customer", body: "First message" },
+        { id: "m2", kind: "customer", body: "Second message" },
+        { id: "m4", kind: "customer", body: "Loaded after highlighting" }
+      ] })
+      widget.acknowledgeHighlightedConversation()
+      if (Model.messageUnread(service.localReadState, "smoke", { id: "m4" })) {
+        console.error("intercom qml smoke failed: loaded message in highlighted conversation stayed unread")
+        Qt.quit()
+        return
+      }
+      widget.selectInboxIndex(1)
+      if (service.barUrgent || Model.messageUnread(service.localReadState, "other", { id: "m3" })) {
+        console.error("intercom qml smoke failed: highlighting last unread conversation left tray urgent")
         Qt.quit()
         return
       }

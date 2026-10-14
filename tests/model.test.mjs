@@ -63,6 +63,20 @@ assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), tru
 anonymousReads = model.updateLocalReadState(anonymousReads, { id: "cards", messages: [anonymousMessage] }, true);
 assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), false);
 
+// Highlighting a conversation marks all its messages read, but not other threads.
+let highlightedReads = model.updateLocalReadState({}, {
+  id: "highlighted", messages: [firstMessage, secondMessage]
+}, false);
+highlightedReads = model.updateLocalReadState(highlightedReads, { id: "other-thread", messages: [firstMessage] }, false);
+const beforeHighlight = highlightedReads;
+highlightedReads = model.markConversationRead(highlightedReads, "highlighted");
+assert.equal(model.messageUnread(highlightedReads, "highlighted", firstMessage), false);
+assert.equal(model.messageUnread(highlightedReads, "highlighted", secondMessage), false);
+assert.equal(model.messageUnread(highlightedReads, "other-thread", firstMessage), true);
+assert.equal(model.messageUnread(beforeHighlight, "highlighted", firstMessage), true);
+highlightedReads = model.markConversationRead(highlightedReads, "other-thread");
+assert.equal(model.pendingUrgentCount(model.localUnreadConversations(highlightedReads)), 0);
+
 // A locally unread thread outside the limited inbox page must remain reachable.
 const page = [{ id: "recent", state: "open", updatedAt: 200 }];
 const oldThreads = [

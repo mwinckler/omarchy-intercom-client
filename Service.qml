@@ -351,13 +351,13 @@ Item {
     return hasNew
   }
 
-  function markMessageRead(conversationId, index) {
+  function markConversationRead(conversationId) {
     var id = String(conversationId || "")
-    if (id === "" || id !== String(threadId) || id !== String((thread || {}).id || "")) return
-    if (index < 0 || index >= messages.length) return
-    var msg = messages[index]
-    if (!Model.messageUnread(localReadState, id, msg)) return
-    observeMessages({ id: id, messages: [msg] }, true)
+    if (!Model.isSafeConversationId(id) || !pendingUrgent[id]) return
+    localReadState = Model.markConversationRead(localReadState, id)
+    pendingUrgent = Model.localUnreadConversations(localReadState)
+    refreshBarUrgent()
+    schedulePersistCache()
   }
 
   function refreshBarUrgent() {
