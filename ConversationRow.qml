@@ -5,6 +5,7 @@ import qs.Ui
 
 BorderSurface {
   id: root
+  readonly property var themeFont: Style.font
 
   property var conversation: ({})
   property bool selected: false
@@ -12,7 +13,7 @@ BorderSurface {
   property color foreground: Color.foreground
   property color accent: Color.accent
   property color urgent: Color.urgent
-  property string fontFamily: Style.font.family
+  property string fontFamily: root.themeFont.family
   property string waitingLabel: ""
   property string updatedLabel: ""
   property bool hasDraft: false
@@ -74,7 +75,7 @@ BorderSurface {
         text: String(root.conversation.title || "Conversation")
         color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: root.themeFont.body
         font.bold: true
         elide: Text.ElideRight
       }
@@ -85,7 +86,7 @@ BorderSurface {
         text: String(root.conversation.from || "")
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
         font.bold: true
         wrapMode: Text.WordWrap
       }
@@ -100,7 +101,7 @@ BorderSurface {
         text: String(root.conversation.email || "")
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
         wrapMode: Text.WrapAnywhere
       }
 
@@ -110,7 +111,7 @@ BorderSurface {
         text: String(root.conversation.snippet || "")
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: root.themeFont.bodySmall
         wrapMode: Text.WordWrap
         maximumLineCount: 3
         elide: Text.ElideRight
@@ -137,7 +138,7 @@ BorderSurface {
           text: root.metaLabel
           color: root.waiting ? root.urgent : root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           font.bold: root.waiting
         }
       }
@@ -156,7 +157,7 @@ BorderSurface {
           text: "DRAFT"
           color: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           font.bold: true
         }
       }
@@ -175,7 +176,7 @@ BorderSurface {
           text: "LATER"
           color: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           font.bold: true
         }
       }

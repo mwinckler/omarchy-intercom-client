@@ -108,14 +108,15 @@ US, EU, and AU API hosts are tried automatically. The region that succeeds is ca
 - A desktop notification appears when a customer message puts a thread into waiting
   (or sends a follow-up on one that is already waiting). The toast shows the sender
   and a preview; clicking it opens this widget expanded on that conversation.
-- The bar icon flashes while any fetched messages remain unread locally and stops
-  when none remain. Unread message cards have a dot in their upper-left corner.
+- The bar icon flashes while any fetched messages in Open conversations remain
+  unread locally and stops when none remain. Unread message cards have a dot in their upper-left corner.
   Highlighting a conversation in the list (by keyboard or click) marks all its
   messages read, without needing to focus the right-hand pane. Messages loaded
   while that conversation remains highlighted in the focused panel are also read. Read
   status survives restarts in `~/.config/omarchy/intercom-notifier/cache.json` and
-  is independent of Intercom's read status; background fetching or closing a
-  conversation does not mark it read. Your own replies and notes are excluded.
+  is independent of Intercom's read status. Background fetching does not mark Open
+  conversations read. All other statuses (including Closed and Snoozed) are always
+  treated as read and never make the icon flash. Your own replies and notes are excluded.
 - Conversation rows also show an unread dot. Unread conversations missing from
   the latest inbox page remain at the top of their matching filter, so older
   unread messages cannot leave the tray flashing without a way to reach them.
@@ -158,3 +159,9 @@ You can also sign out from the panel profile, or delete
 omarchy plugin validate .
 ./tests/run.sh
 ```
+
+The test suite requires Qt 6's `qmllint` and fails on lint warnings. Run
+`bash tests/lint.sh` for lint alone; `QMLLINT` can select a Qt 6 executable when
+Qt 5 is also installed. The lint setup resolves Omarchy's `qs.*` imports and
+supplies Quickshell's missing process-exit enum metadata in a temporary overlay,
+without modifying installed files or disabling checks.

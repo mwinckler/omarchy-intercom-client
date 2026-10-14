@@ -10,7 +10,7 @@ vm.runInContext(source, model, { filename: "Model.js" });
 
 const firstMessage = { id: "m1", kind: "customer", createdAt: 100, body: "Hello" };
 const secondMessage = { id: "m2", kind: "customer", createdAt: 100, body: "Follow-up" };
-const localThread = { id: "local", waitingSince: 100, messages: [firstMessage] };
+const localThread = { id: "local", state: "open", waitingSince: 100, messages: [firstMessage] };
 let localReads = model.updateLocalReadState({}, localThread, false);
 assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 1);
 localReads = model.updateLocalReadState(localReads, localThread, true);
@@ -22,8 +22,8 @@ assert.equal(localReads.local.$m2, false);
 // A stale displayed thread cannot acknowledge a message it doesn't contain.
 localReads = model.updateLocalReadState(localReads, localThread, true);
 assert.equal(localReads.local.$m2, false);
-// Disappearing from the waiting list / being closed doesn't discard unread state.
-localReads = model.updateLocalReadState(localReads, { id: "local", state: "closed", messages: [] }, false);
+// Disappearing from the waiting list alone doesn't discard unread state.
+localReads = model.updateLocalReadState(localReads, { id: "local", state: "open", messages: [] }, false);
 assert.equal(localReads.local.$m2, false);
 const restoredReads = model.parseDiskCache(model.serializeDiskCache({
   state: "ready", localReadState: localReads
@@ -32,12 +32,12 @@ assert.equal(restoredReads.local.$m1, true);
 assert.equal(restoredReads.local.$m2, false);
 localReads = model.updateLocalReadState(restoredReads, { ...localThread, messages: [secondMessage] }, true);
 assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 0);
-localReads = model.updateLocalReadState(localReads, { id: "local", messages: [
+localReads = model.updateLocalReadState(localReads, { id: "local", state: "open", messages: [
   { id: "mine", kind: "teammate", email: "me@example.com", body: "My reply" },
   { id: "note", kind: "note", email: "me@example.com", body: "My note" }
 ] }, false, "me@example.com");
 assert.equal(model.pendingUrgentCount(model.localUnreadConversations(localReads)), 0);
-localReads = model.updateLocalReadState(localReads, { id: "local", messages: [
+localReads = model.updateLocalReadState(localReads, { id: "local", state: "open", messages: [
   { id: "other", kind: "teammate", email: "other@example.com", body: "Another teammate" }
 ] }, false, "me@example.com");
 assert.equal(localReads.local.$other, false);
@@ -45,29 +45,72 @@ assert.equal(model.messageUnread(localReads, "local", { id: "other" }), true);
 assert.equal(model.messageUnread(localReads, "local", firstMessage), false);
 assert.equal(model.messageUnread(localReads, "missing", firstMessage), false);
 
+// Every status other than Open clears existing unread flags, even without messages.
+for (const state of ["closed", "snoozed", "unknown", "", undefined]) {
+  let reads = model.updateLocalReadState({}, localThread, false);
+  const before = reads;
+  reads = model.updateLocalReadState(reads, { id: "local", state, messages: [] }, false);
+  assert.equal(model.messageUnread(reads, "local", firstMessage), false);
+  assert.equal(model.pendingUrgentCount(model.localUnreadConversations(reads)), 0);
+  assert.equal(model.messageUnread(before, "local", firstMessage), true);
+  reads = model.updateLocalReadState(reads, { id: "local", state, messages: [secondMessage] }, false);
+  assert.equal(model.messageUnread(reads, "local", secondMessage), false);
+  reads = model.updateLocalReadState(reads, { ...localThread, messages: [firstMessage, secondMessage] }, false);
+  assert.equal(model.pendingUrgentCount(model.localUnreadConversations(reads)), 0);
+  reads = model.updateLocalReadState(reads, { ...localThread, messages: [{ id: "new", body: "New after reopening" }] }, false);
+  assert.equal(model.pendingUrgentCount(model.localUnreadConversations(reads)), 1);
+}
+assert.equal(model.conversationIsOpen({ state: "Open" }), true);
+
+// Old cached unread flags must not make non-open (or unknown) threads urgent on startup.
+const legacyReads = { open: { $m1: false }, closed: { $m1: false }, snoozed: { $m1: false }, missing: { $m1: false } };
+const restoredStatusReads = model.restoreLocalReadState({
+  localReadState: legacyReads,
+  conversations: [{ id: "open" }], // Legacy open-only waiting summary.
+  inboxes: model.writeInboxCache({}, "snoozed", [{ id: "snoozed", state: "snoozed" }], 1, 200),
+  threads: model.writeCachedThread({}, { id: "closed", state: "closed" }, 100)
+});
+assert.deepEqual(Object.keys(model.localUnreadConversations(restoredStatusReads)), ["open"]);
+assert.equal(legacyReads.closed.$m1, false);
+// The freshest status wins when inbox and thread snapshots disagree.
+for (const threadAt of [100, 300]) {
+  const restored = model.restoreLocalReadState({
+    localReadState: { local: { $m1: false } },
+    inboxes: model.writeInboxCache({}, "closed", [{ id: "local", state: "closed" }], 1, 200),
+    threads: model.writeCachedThread({}, localThread, threadAt)
+  });
+  assert.equal(model.messageUnread(restored, "local", firstMessage), threadAt > 200);
+}
+const openInboxReads = model.reconcileOpenReadState(legacyReads, [{ id: "open", state: "open" }]);
+assert.deepEqual(Object.keys(model.localUnreadConversations(openInboxReads)), ["open"]);
+assert.equal(legacyReads.closed.$m1, false);
+assert.equal(model.parseDiskCache(JSON.stringify({
+  state: "ready", conversations: [{ id: "legacy-waiting" }]
+})).conversations[0].state, "open");
+
 // Focusing one card clears only its dot, and urgency lasts until the last unread card.
 let focusedReads = model.updateLocalReadState({}, {
-  id: "cards", messages: [firstMessage, secondMessage]
+  id: "cards", state: "open", messages: [firstMessage, secondMessage]
 }, false);
-focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", messages: [firstMessage] }, true);
+focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", state: "open", messages: [firstMessage] }, true);
 assert.equal(model.messageUnread(focusedReads, "cards", firstMessage), false);
 assert.equal(model.messageUnread(focusedReads, "cards", secondMessage), true);
 assert.equal(model.pendingUrgentCount(model.localUnreadConversations(focusedReads)), 1);
-focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", messages: [secondMessage] }, true);
+focusedReads = model.updateLocalReadState(focusedReads, { id: "cards", state: "open", messages: [secondMessage] }, true);
 assert.equal(model.messageUnread(focusedReads, "cards", secondMessage), false);
 assert.equal(model.pendingUrgentCount(model.localUnreadConversations(focusedReads)), 0);
 
 const anonymousMessage = { createdAt: 100, kind: "customer", from: "Customer", body: "No ID" };
-let anonymousReads = model.updateLocalReadState({}, { id: "cards", messages: [anonymousMessage] }, false);
+let anonymousReads = model.updateLocalReadState({}, { id: "cards", state: "open", messages: [anonymousMessage] }, false);
 assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), true);
-anonymousReads = model.updateLocalReadState(anonymousReads, { id: "cards", messages: [anonymousMessage] }, true);
+anonymousReads = model.updateLocalReadState(anonymousReads, { id: "cards", state: "open", messages: [anonymousMessage] }, true);
 assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), false);
 
 // Highlighting a conversation marks all its messages read, but not other threads.
 let highlightedReads = model.updateLocalReadState({}, {
-  id: "highlighted", messages: [firstMessage, secondMessage]
+  id: "highlighted", state: "open", messages: [firstMessage, secondMessage]
 }, false);
-highlightedReads = model.updateLocalReadState(highlightedReads, { id: "other-thread", messages: [firstMessage] }, false);
+highlightedReads = model.updateLocalReadState(highlightedReads, { id: "other-thread", state: "open", messages: [firstMessage] }, false);
 const beforeHighlight = highlightedReads;
 highlightedReads = model.markConversationRead(highlightedReads, "highlighted");
 assert.equal(model.messageUnread(highlightedReads, "highlighted", firstMessage), false);
@@ -89,22 +132,22 @@ for (const thread of oldThreads) {
   pageReads = model.updateLocalReadState(pageReads, thread, thread.id === "already-read");
 }
 let reachable = model.includeUnreadConversations(page, [oldThreads, oldThreads], pageReads);
-assert.deepEqual(Array.from(reachable, row => row.id), ["older", "closed-unread", "recent"]);
+assert.deepEqual(Array.from(reachable, row => row.id), ["older", "recent"]);
 assert.deepEqual(Array.from(model.filterInbox(reachable, "open"), row => row.id), ["older", "recent"]);
-assert.deepEqual(Array.from(model.filterInbox(reachable, "closed"), row => row.id), ["closed-unread"]);
+assert.deepEqual(Array.from(model.filterInbox(reachable, "closed"), row => row.id), []);
 assert.equal(model.resolveInboxSelection(reachable, "open", "older", 1).index, 0);
-pageReads = model.updateLocalReadState(pageReads, { id: "older", messages: [firstMessage] }, true);
+pageReads = model.updateLocalReadState(pageReads, { id: "older", state: "open", messages: [firstMessage] }, true);
 reachable = model.includeUnreadConversations(page, [oldThreads], pageReads);
 assert.equal(reachable[0].id, "older");
 pageReads = model.updateLocalReadState(pageReads, oldThreads[0], true);
 reachable = model.includeUnreadConversations(page, [oldThreads], pageReads);
-assert.deepEqual(Array.from(reachable, row => row.id), ["closed-unread", "recent"]);
-// The full thread state takes precedence over summaries missing a state.
+assert.deepEqual(Array.from(reachable, row => row.id), ["recent"]);
+// A stale unread flag and a summary missing state cannot resurrect a closed thread.
 reachable = model.includeUnreadConversations(page, [
   [{ id: "closed-unread", state: "", updatedAt: 50 }],
   [oldThreads[1]]
-], pageReads);
-assert.equal(reachable[0].state, "closed");
+], { "closed-unread": { $m1: false } });
+assert.deepEqual(Array.from(reachable, row => row.id), ["recent"]);
 assert.equal(model.filterInbox(reachable, "open").length, 1);
 assert.equal(JSON.stringify(model.normalizeLocalReadState({ bad: { "$m": "false", "$n": false } })),
   JSON.stringify({ bad: { "$n": false } }));

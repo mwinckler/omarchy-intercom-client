@@ -9,7 +9,7 @@ Item {
 
   property var settings: ({})
 
-  property string state: "loading"
+  state: "loading"
   property string message: "Checking Intercom…"
   property bool countsLoaded: false
   property int waitingCount: 0
@@ -562,7 +562,7 @@ Item {
       message = "No conversations are waiting for a reply."
     threadCache = row.threads || {}
     inboxCache = row.inboxes || {}
-    localReadState = Model.normalizeLocalReadState(row.localReadState)
+    localReadState = Model.restoreLocalReadState(row)
     pendingUrgent = Model.localUnreadConversations(localReadState)
     refreshBarUrgent()
     seenConversations = Model.conversationIndex(conversations)
@@ -654,6 +654,12 @@ Item {
         : count)
     }
     rememberInbox(source, merged, inboxCountForSource(source))
+    if (source === "open") {
+      localReadState = Model.reconcileOpenReadState(localReadState, merged)
+      pendingUrgent = Model.localUnreadConversations(localReadState)
+      refreshBarUrgent()
+    }
+    seedThreadCache(merged)
     if (source !== Model.inboxFetchFilter(inboxFilter)) {
       schedulePersistCache()
       return
@@ -664,7 +670,6 @@ Item {
     if (source === "open" && openCount < merged.length)
       openCount = merged.length
     openMessage = ""
-    seedThreadCache(merged)
     schedulePersistCache()
   }
 
@@ -682,9 +687,19 @@ Item {
     for (var i = 0; i < list.length; i++) {
       var conv = list[i] || {}
       if (String(conv.id || "") === "") continue
-      if (!(conv.messages || []).length) continue
       var hasNew = observeMessages(conv, false)
       var existing = Model.readCachedThread(cache, conv.id)
+      if (existing && String(conv.state || "") !== "" && existing.conversation.state !== conv.state) {
+        existing.conversation.state = conv.state
+        cache = Model.writeCachedThread(cache, existing.conversation, existing.fetchedAt, existing.complete)
+      }
+      if (String(conv.state || "") !== "" && String(conv.id) === currentId
+          && String((thread || {}).id || "") === currentId && thread.state !== conv.state) {
+        var updated = Model.copyConversation(thread)
+        updated.state = conv.state
+        thread = updated
+      }
+      if (!(conv.messages || []).length) continue
       if (existing && existing.complete && !hasNew) continue
       if (hasNew && String(conv.id) === currentId) refreshCurrent = true
       cache = Model.writeCachedThread(cache, conv, now, false)
@@ -1172,6 +1187,7 @@ Item {
     conversations = Model.removeConversation(conversations, id)
     syncInboxCaches(row, "closed", previous)
     applyVisibleInboxAfterStateChange(row, "closed")
+    seedThreadCache([row])
     schedulePersistCache()
   }
 

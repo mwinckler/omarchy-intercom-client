@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import Quickshell
@@ -13,12 +15,16 @@ Panel {
   ipcTarget: "intercom-notifier"
   manageIpc: false
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // The shell exposes these extensible objects as QtObject, without member types.
+  readonly property var barApi: bar
+  readonly property var themeFont: Style.font
+  readonly property var popupColors: Color.popups
+  readonly property color foreground: barApi ? barApi.foreground : Color.foreground
+  readonly property color urgent: barApi ? barApi.urgent : Color.urgent
   readonly property color accent: Color.accent
   readonly property color dim: Qt.darker(foreground, 1.5)
-  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property bool vertical: bar ? bar.vertical : false
+  readonly property string fontFamily: barApi ? barApi.fontFamily : themeFont.family
+  readonly property bool vertical: barApi ? barApi.vertical : false
   readonly property bool barCountsPending: !intercom.countsLoaded
 
   property bool large: false
@@ -1044,7 +1050,7 @@ Panel {
     if (kind === "message") return messageRepeater.itemAt(item.index)
     if (kind === "draft") return draftMessageRow
     if (kind === "draft-action") return threadDiscardButton
-    var block = scheduledRepeater.itemAt(item.index)
+    var block = scheduledRepeater.itemAt(item.index) as ScheduledBlock
     if (!block) return null
     if (kind === "scheduled") return block.messageRow
     if (kind === "scheduled-action") return block.cancelButton
@@ -1674,8 +1680,8 @@ Panel {
         if (root.filterChordActive) root.endFilterChord()
         if (root.searchOpen) {
           if (dy !== 0) root.moveSearch(dy)
-          else if (dx > 0) pane = "thread"
-          else if (dx < 0) pane = "list"
+          else if (dx > 0) root.pane = "thread"
+          else if (dx < 0) root.pane = "list"
           return
         }
         root.moveExpanded(dx, dy)
@@ -1805,7 +1811,7 @@ Panel {
                   text: "󰍡"
                   color: intercom.waitingCount > 0 ? root.urgent : root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
+                  font.pixelSize: root.themeFont.display
                   horizontalAlignment: Text.AlignHCenter
                   verticalAlignment: Text.AlignVCenter
                 }
@@ -1880,7 +1886,7 @@ Panel {
                   : Model.statusMessage(intercom.state, intercom.message)
                 color: intercom.state === "error" ? root.urgent : root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -1895,7 +1901,7 @@ Panel {
                 }
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -1904,7 +1910,7 @@ Panel {
                 text: "Callback URL to enter in Intercom:"
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -1918,7 +1924,7 @@ Panel {
                   text: Model.OAUTH_REDIRECT_URL
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: root.themeFont.bodySmall
                   wrapMode: Text.WrapAnywhere
                   verticalAlignment: Text.AlignVCenter
 
@@ -2005,7 +2011,7 @@ Panel {
                 text: "Download every conversation, including closed threads, into a local archive for later search. Closed threads are stored once and are not watched for new replies."
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -2034,7 +2040,7 @@ Panel {
                 )
                 color: intercom.syncState === "error" ? root.urgent : root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -2045,7 +2051,7 @@ Panel {
                   : "Optional workspace ID or inbox URL, if conversation links do not open."
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -2066,7 +2072,7 @@ Panel {
                 text: "Advanced: paste an OAuth access token if sign-in cannot complete."
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: root.themeFont.bodySmall
                 wrapMode: Text.WordWrap
               }
 
@@ -2107,7 +2113,7 @@ Panel {
               : (root.needsSetup ? "Tab next  ·  󰌑 activate  ·  Esc close" : "Tab next  ·  󰌑 activate  ·  Esc back"))
             color: root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.themeFont.caption
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
           }
@@ -2142,7 +2148,7 @@ Panel {
               text: "Intercom"
               color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.heading
+              font.pixelSize: root.themeFont.heading
               font.bold: true
             }
 
@@ -2292,7 +2298,7 @@ Panel {
                 : "No conversations matched.")
             color: intercom.searchMessage.indexOf("Could not") >= 0 ? root.urgent : root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.themeFont.caption
             wrapMode: Text.WordWrap
           }
 
@@ -2302,7 +2308,7 @@ Panel {
             text: intercom.openMessage
             color: intercom.openMessage.indexOf("Could not") >= 0 ? root.urgent : root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: root.themeFont.caption
             wrapMode: Text.WordWrap
           }
         }
@@ -2334,7 +2340,7 @@ Panel {
                 : "j/k list  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close")))))
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           horizontalAlignment: Text.AlignHCenter
           wrapMode: Text.WordWrap
         }
@@ -2411,7 +2417,7 @@ Panel {
 
                 Text {
                   width: parent.width
-                  visible: !intercom.openLoading && (root.searchOpen ? root.searchResults.length === 0 && String(root.searchQuery || "").trim() === "" : inboxConversations.length === 0)
+                  visible: !intercom.openLoading && (root.searchOpen ? root.searchResults.length === 0 && String(root.searchQuery || "").trim() === "" : root.inboxConversations.length === 0)
                   text: root.searchOpen
                     ? "Type to search."
                     : (intercom.openMessage !== ""
@@ -2419,20 +2425,20 @@ Panel {
                     : Model.emptyInboxMessage(intercom.inboxFilter))
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: root.themeFont.bodySmall
                   wrapMode: Text.WordWrap
                 }
 
                 Repeater {
                   id: inboxRepeater
-                  model: root.searchOpen ? root.searchResults : inboxConversations
+                  model: root.searchOpen ? root.searchResults : root.inboxConversations
 
                   ConversationRow {
                     required property int index
                     required property var modelData
                     width: inboxColumn.width
                     conversation: modelData
-                    unread: !!intercom.pendingUrgent[String(modelData.id)]
+                    unread: Model.conversationIsOpen(modelData) && !!intercom.pendingUrgent[String(modelData.id)]
                     waitingLabel: root.searchOpen
                       ? root.searchResultWaitingLabel(modelData)
                       : Model.formatWaiting(modelData.waitingSince, root.nowMs)
@@ -2501,7 +2507,7 @@ Panel {
                   text: root.viewedThreadTitle()
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
+                  font.pixelSize: root.themeFont.body
                   font.bold: true
                   wrapMode: Text.WordWrap
                 }
@@ -2512,7 +2518,7 @@ Panel {
                   text: intercom.threadMessage
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: root.themeFont.bodySmall
                   wrapMode: Text.WordWrap
                 }
 
@@ -2525,7 +2531,8 @@ Panel {
                     required property int index
                     width: threadColumn.width
                     message: modelData
-                    unread: Model.messageUnread(intercom.localReadState, intercom.threadId, modelData)
+                    unread: Model.conversationIsOpen(intercom.thread)
+                      && Model.messageUnread(intercom.localReadState, intercom.threadId, modelData)
                     unreadColor: root.urgent
                     selected: root.threadItemSelected("message", modelData.id, index)
                     timeLabel: Model.formatMessageTime(modelData.createdAt, root.nowMs)
@@ -2575,7 +2582,7 @@ Panel {
                     foreground: root.foreground
                     accent: root.accent
                     fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
+                    fontSize: root.themeFont.caption
                     onClicked: {
                       root.selectThreadItem("draft-action")
                       root.discardThreadDraft()
@@ -2587,11 +2594,12 @@ Panel {
                   id: scheduledRepeater
                   model: root.threadScheduled
 
-                  Column {
+                  delegate: ScheduledBlock {
+                    id: scheduledBlock
                     required property var modelData
                     required property int index
-                    property alias messageRow: scheduledMessage
-                    property alias cancelButton: scheduledCancel
+                    messageRow: scheduledMessage
+                    cancelButton: scheduledCancel
                     width: threadColumn.width
                     spacing: Style.space(6)
 
@@ -2601,15 +2609,15 @@ Panel {
                       message: ({
                         from: Model.adminLabel(intercom.adminName, intercom.adminEmail, "You"),
                         email: String(intercom.adminEmail || ""),
-                        kind: modelData.note ? "note" : "teammate",
-                        body: Model.markdownToStyled(modelData.body)
+                        kind: scheduledBlock.modelData.note ? "note" : "teammate",
+                        body: Model.markdownToStyled(scheduledBlock.modelData.body)
                       })
-                      badge: "LATER · " + Model.formatScheduleTime(modelData.sendAt)
-                      selected: root.threadItemSelected("scheduled", modelData.id, index)
+                      badge: "LATER · " + Model.formatScheduleTime(scheduledBlock.modelData.sendAt)
+                      selected: root.threadItemSelected("scheduled", scheduledBlock.modelData.id, scheduledBlock.index)
                       foreground: root.foreground
                       accent: root.accent
                       fontFamily: root.fontFamily
-                      onActivated: root.selectThreadItem("scheduled", modelData.id, index)
+                      onActivated: root.selectThreadItem("scheduled", scheduledBlock.modelData.id, scheduledBlock.index)
                       onLinkActivated: function(url) {
                         if (Model.isSafeHttpUrl(url)) intercom.openUrl(url)
                       }
@@ -2619,14 +2627,14 @@ Panel {
                       id: scheduledCancel
                       text: "Cancel scheduled"
                       bordered: true
-                      selected: root.threadItemSelected("scheduled-action", modelData.id, index)
+                      selected: root.threadItemSelected("scheduled-action", scheduledBlock.modelData.id, scheduledBlock.index)
                       foreground: root.foreground
                       accent: root.accent
                       fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
+                      fontSize: root.themeFont.caption
                       onClicked: {
-                        root.selectThreadItem("scheduled-action", modelData.id, index)
-                        root.requestCancelScheduled(modelData.id)
+                        root.selectThreadItem("scheduled-action", scheduledBlock.modelData.id, scheduledBlock.index)
+                        root.requestCancelScheduled(scheduledBlock.modelData.id)
                       }
                     }
                   }
@@ -2657,7 +2665,7 @@ Panel {
                     + Model.adminLabel(intercom.adminName, intercom.adminEmail, "")
                   color: root.replyAsNote ? root.dim : root.accent
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                  font.pixelSize: root.themeFont.caption
                   wrapMode: Text.WordWrap
                   verticalAlignment: Text.AlignVCenter
                 }
@@ -2746,7 +2754,7 @@ Panel {
                 text: intercom.replyMessage
                 color: root.urgent
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.themeFont.caption
                 wrapMode: Text.WordWrap
               }
 
@@ -2764,7 +2772,7 @@ Panel {
                   foreground: root.foreground
                   accent: root.accent
                   fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
+                  fontSize: root.themeFont.caption
                   onClicked: root.sendReply()
                 }
 
@@ -2777,7 +2785,7 @@ Panel {
                   foreground: root.foreground
                   accent: root.accent
                   fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
+                  fontSize: root.themeFont.caption
                   onClicked: root.openScheduleDialog()
                 }
 
@@ -2800,7 +2808,7 @@ Panel {
                   foreground: root.foreground
                   accent: root.accent
                   fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
+                  fontSize: root.themeFont.caption
                   onClicked: root.discardComposerDraft()
                 }
               }
@@ -2812,7 +2820,7 @@ Panel {
                   : "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.themeFont.caption
                 wrapMode: Text.WordWrap
               }
             }
@@ -2869,7 +2877,7 @@ Panel {
         : "Discard this scheduled message?"
       cancelText: "Keep"
       confirmText: "Discard"
-      background: Color.popups.background
+      background: root.popupColors.background
       foreground: root.foreground
       selectedText: root.accent
       fontFamily: root.fontFamily
@@ -2894,7 +2902,7 @@ Panel {
     property bool focusable: false
     property color foreground: Color.foreground
     property color accent: Color.accent
-    property string fontFamily: Style.font.family
+    property string fontFamily: root.themeFont.family
     property Item signOutButton: null
     property Item signInButton: null
 
@@ -2926,7 +2934,7 @@ Panel {
         text: chip.initials !== "" ? chip.initials : "󰀄"
         color: chip.accent
         font.family: chip.fontFamily
-        font.pixelSize: chip.initials !== "" ? Style.font.caption : Style.font.bodySmall
+        font.pixelSize: chip.initials !== "" ? root.themeFont.caption : root.themeFont.bodySmall
         font.bold: true
       }
     }
@@ -2939,7 +2947,7 @@ Panel {
         text: chip.label
         color: chip.foreground
         font.family: chip.fontFamily
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: root.themeFont.bodySmall
         font.bold: true
         elide: Text.ElideRight
         width: Math.min(implicitWidth, Style.space(180))
@@ -2954,7 +2962,7 @@ Panel {
           text: chip.emailLine
           color: Qt.darker(chip.foreground, 1.5)
           font.family: chip.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           elide: Text.ElideRight
           width: Math.min(implicitWidth, Style.space(140))
         }
@@ -2970,7 +2978,7 @@ Panel {
           foreground: chip.accent
           accent: chip.accent
           fontFamily: chip.fontFamily
-          fontSize: Style.font.caption
+          fontSize: root.themeFont.caption
           horizontalPadding: Style.space(4)
           verticalPadding: Style.space(2)
           Keys.onPressed: function(event) { chip.settingsKey(event) }
@@ -2988,7 +2996,7 @@ Panel {
           foreground: chip.accent
           accent: chip.accent
           fontFamily: chip.fontFamily
-          fontSize: Style.font.caption
+          fontSize: root.themeFont.caption
           horizontalPadding: Style.space(4)
           verticalPadding: Style.space(2)
           Keys.onPressed: function(event) { chip.settingsKey(event) }
@@ -2998,6 +3006,11 @@ Panel {
         }
       }
     }
+  }
+
+  component ScheduledBlock: Column {
+    property Item messageRow
+    property Item cancelButton
   }
 
   component BarLoadingDots: Row {
@@ -3012,6 +3025,7 @@ Panel {
     Repeater {
       model: 3
       Rectangle {
+        id: loadingDot
         required property int index
         width: dots.dotSize
         height: dots.dotSize
@@ -3022,10 +3036,10 @@ Panel {
         SequentialAnimation on opacity {
           running: dots.running
           loops: Animation.Infinite
-          PauseAnimation { duration: index * 160 }
+          PauseAnimation { duration: loadingDot.index * 160 }
           NumberAnimation { to: 1; duration: 220; easing.type: Easing.OutCubic }
           NumberAnimation { to: 0.2; duration: 280; easing.type: Easing.InCubic }
-          PauseAnimation { duration: (2 - index) * 160 }
+          PauseAnimation { duration: (2 - loadingDot.index) * 160 }
         }
       }
     }
@@ -3036,7 +3050,7 @@ Panel {
 
     property color foreground: Color.foreground
     property color accent: Color.accent
-    property string fontFamily: Style.font.family
+    property string fontFamily: root.themeFont.family
     property string label: ""
 
     width: implicitWidth
@@ -3083,16 +3097,17 @@ Panel {
         Repeater {
           model: 3
           Item {
+            id: orbitDot
             required property int index
             anchors.fill: parent
             rotation: index * 120
 
             Rectangle {
-              width: Style.space(8 - index)
+              width: Style.space(8 - orbitDot.index)
               height: width
               radius: width / 2
               color: mark.accent
-              opacity: 1 - index * 0.28
+              opacity: 1 - orbitDot.index * 0.28
               anchors.horizontalCenter: parent.horizontalCenter
               anchors.top: parent.top
               anchors.topMargin: -height / 2
@@ -3141,7 +3156,7 @@ Panel {
         text: "󰍡"
         color: mark.accent
         font.family: mark.fontFamily
-        font.pixelSize: Style.font.display
+        font.pixelSize: root.themeFont.display
         transformOrigin: Item.Center
         opacity: 0.55
         scale: 0.94
@@ -3171,7 +3186,7 @@ Panel {
       text: mark.label
       color: Qt.darker(mark.foreground, 1.5)
       font.family: mark.fontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: root.themeFont.caption
     }
   }
 
@@ -3185,7 +3200,7 @@ Panel {
     property bool chosen: false
     property color foreground: Color.foreground
     property color accent: Color.accent
-    property string fontFamily: Style.font.family
+    property string fontFamily: root.themeFont.family
 
     signal activated()
 
@@ -3209,7 +3224,7 @@ Panel {
       text: chip.label + (chip.countText !== "" ? "  " + chip.countText : "")
       color: chip.chosen ? chip.accent : chip.foreground
       font.family: chip.fontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: root.themeFont.caption
       font.bold: chip.chosen
     }
 
@@ -3233,7 +3248,7 @@ Panel {
         text: chip.shortcut
         color: chip.accent
         font.family: chip.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
         font.bold: true
       }
     }

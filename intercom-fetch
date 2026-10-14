@@ -935,6 +935,7 @@ def normalize_conversation(conv: dict, region: str, workspace_id: str) -> dict |
         "snippet": snippet,
         "url": conversation_url(region, workspace_id, conv_id),
         "waitingSince": waiting_since,
+        "state": conversation_state(conv),
         "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
         "messages": extract_messages(conv),
     }

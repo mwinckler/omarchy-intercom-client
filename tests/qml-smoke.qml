@@ -126,11 +126,11 @@ ShellRoot {
       widget.compositorFocusLost = true
       widget.expandConversationId = "smoke"
       service.threadId = "smoke"
-      service.showThread({ id: "smoke", messages: [
+      service.showThread({ id: "smoke", state: "open", messages: [
         { id: "m1", kind: "customer", body: "First unread message" },
         { id: "m2", kind: "customer", body: "Second unread message" }
       ] })
-      service.observeMessages({ id: "other", messages: [
+      service.observeMessages({ id: "other", state: "open", messages: [
         { id: "m3", kind: "customer", body: "Unread in another conversation" }
       ] }, false)
       service.openConversations = [{ id: "smoke", state: "open" }, { id: "other", state: "open" }]
@@ -151,7 +151,7 @@ ShellRoot {
         Qt.quit()
         return
       }
-      service.showThread({ id: "smoke", messages: [
+      service.showThread({ id: "smoke", state: "open", messages: [
         { id: "m1", kind: "customer", body: "First message" },
         { id: "m2", kind: "customer", body: "Second message" },
         { id: "m4", kind: "customer", body: "Loaded after highlighting" }
@@ -170,7 +170,7 @@ ShellRoot {
       }
       var draftConversationId = widget.expandConversationId
       service.messagesLoading = false
-      service.showThread({ id: draftConversationId, messages: [] })
+      service.showThread({ id: draftConversationId, state: "open", messages: [] })
       service.drafts = Model.setDraft({}, draftConversationId, "Unsent reply", false)
       widget.selectThreadItem("draft")
       var draftRow = widget.threadFocusDelegate()
@@ -205,6 +205,25 @@ ShellRoot {
         return
       }
       widget.stopComposing(true)
+      service.scheduled = [{
+        id: "scheduled-smoke", conversationId: draftConversationId,
+        body: "Scheduled smoke reply", note: false, sendAt: Date.now() + 3600000
+      }]
+      widget.selectThreadItem("scheduled", "scheduled-smoke", 0)
+      var scheduledRow = widget.threadFocusDelegate()
+      if (!scheduledRow || scheduledRow.message.body !== "Scheduled smoke reply") {
+        console.error("intercom qml smoke failed: scheduled message delegate or model scope")
+        Qt.quit()
+        return
+      }
+      widget.selectThreadItem("scheduled-action", "scheduled-smoke", 0)
+      var scheduledButton = widget.threadFocusDelegate()
+      if (!scheduledButton || scheduledButton.text !== "Cancel scheduled") {
+        console.error("intercom qml smoke failed: scheduled action delegate")
+        Qt.quit()
+        return
+      }
+      service.scheduled = []
       widget.compositorFocusLost = true
       widget.toggle()
       if (!widget.opened) {
@@ -216,6 +235,68 @@ ShellRoot {
       if (widget.opened) {
         console.error("intercom qml smoke failed: focused toggle left the panel open")
         widget.close()
+        Qt.quit()
+        return
+      }
+      // Non-open messages never create unread dots or tray urgency.
+      service.localReadState = {}
+      for (var status of ["closed", "snoozed"]) {
+        service.showThread({ id: "smoke", state: status, messages: [
+          { id: "m1", body: "Not open" }
+        ] })
+        if (dot.visible || service.barUrgent || service.pendingUrgent.smoke) {
+          console.error("intercom qml smoke failed: non-open thread created unread urgency", status)
+          Qt.quit()
+          return
+        }
+      }
+      var openThread = { id: "smoke", state: "open", messages: [{ id: "status-change", body: "Unread before status change" }] }
+      service.threadId = "smoke"
+      service.threadCache = Model.writeCachedThread({}, openThread, Date.now())
+      service.showThread(openThread)
+      service.seedThreadCache([{ id: "smoke", state: "snoozed", messages: [] }])
+      if (service.barUrgent || service.thread.state !== "snoozed"
+          || service.cachedThread("smoke").conversation.state !== "snoozed"
+          || Model.messageUnread(service.localReadState, "smoke", { id: "status-change" })) {
+        console.error("intercom qml smoke failed: status-only update left unread urgency or stale cached state")
+        Qt.quit()
+        return
+      }
+      service.showThread({ id: "smoke", state: "open", messages: [{ id: "before-close", body: "Unread before closing" }] })
+      service.dropClosedConversation("smoke", { id: "smoke", messages: [] })
+      if (service.barUrgent || service.thread.state !== "closed"
+          || Model.messageUnread(service.localReadState, "smoke", { id: "before-close" })) {
+        console.error("intercom qml smoke failed: closing left unread urgency")
+        Qt.quit()
+        return
+      }
+      service.threadId = ""
+      service.localReadState = { background: { "$background": false } }
+      service.inboxFilter = "open"
+      service._inboxRequested = "closed"
+      service.applyInbox(JSON.stringify({ state: "ready", conversations: [{ id: "background", state: "closed" }] }), 0)
+      if (service.barUrgent) {
+        console.error("intercom qml smoke failed: inactive inbox response left unread urgency")
+        Qt.quit()
+        return
+      }
+      service.localReadState = { open: { "$m1": false }, closed: { "$m1": false }, snoozed: { "$m1": false } }
+      service._inboxRequested = "open"
+      service.applyInbox(JSON.stringify({ state: "ready", conversations: [{ id: "open", state: "open" }] }), 0)
+      if (!service.pendingUrgent.open || service.pendingUrgent.closed || service.pendingUrgent.snoozed) {
+        console.error("intercom qml smoke failed: complete Open inbox retained urgency for absent conversations")
+        Qt.quit()
+        return
+      }
+      var restored = Model.parseDiskCache(Model.serializeDiskCache({
+        state: "ready",
+        localReadState: { closed: { "$m1": false }, snoozed: { "$m1": false } },
+        threads: Model.writeCachedThread({}, { id: "closed", state: "closed" }, 100),
+        inboxes: Model.writeInboxCache({}, "snoozed", [{ id: "snoozed", state: "snoozed" }], 1, 100)
+      }))
+      service.restoreDiskCache(restored)
+      if (service.barUrgent || Model.pendingUrgentCount(service.pendingUrgent) !== 0) {
+        console.error("intercom qml smoke failed: restoring non-open threads left unread urgency")
         Qt.quit()
         return
       }

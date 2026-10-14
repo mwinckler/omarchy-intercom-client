@@ -5,12 +5,14 @@ import qs.Ui
 
 TextArea {
   id: root
+  readonly property var themeFont: Style.font
+  readonly property var themeSpacing: Style.spacing
 
   property color foreground: Color.foreground
   property color accent: Color.accent
   property color selectionTint: Style.selectionFillFor(foreground, accent)
-  property real horizontalPadding: Style.spacing.controlPaddingX
-  property real verticalPadding: Style.spacing.inputPaddingY
+  property real horizontalPadding: themeSpacing.controlPaddingX
+  property real verticalPadding: themeSpacing.inputPaddingY
 
   readonly property bool _focused: activeFocus
   readonly property bool _hot: hovered
@@ -18,8 +20,8 @@ TextArea {
 
     wrapMode: TextEdit.Wrap
     selectByMouse: true
-  font.family: Style.font.family
-  font.pixelSize: Style.font.body
+  font.family: themeFont.family
+  font.pixelSize: themeFont.body
   color: foreground
   selectionColor: selectionTint
   selectedTextColor: foreground

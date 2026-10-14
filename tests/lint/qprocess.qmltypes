@@ -1,0 +1,15 @@
+import QtQuick.tooling 1.2
+
+// Quickshell's Process.exited signal references this Qt enum, but its generated
+// qmltypes do not describe it. This supplies tooling metadata, not a runtime type.
+Module {
+  Component {
+    name: "QProcess"
+    prototype: "QObject"
+    accessSemantics: "reference"
+    Enum {
+      name: "ExitStatus"
+      values: ["NormalExit", "CrashExit"]
+    }
+  }
+}

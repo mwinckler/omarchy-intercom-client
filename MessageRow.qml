@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
@@ -7,6 +9,7 @@ import "Model.js" as Model
 
 BorderSurface {
   id: root
+  readonly property var themeFont: Style.font
 
   property var message: ({})
   property bool selected: false
@@ -15,7 +18,7 @@ BorderSurface {
   property color unreadColor: Color.urgent
   property color foreground: Color.foreground
   property color accent: Color.accent
-  property string fontFamily: Style.font.family
+  property string fontFamily: root.themeFont.family
   property string timeLabel: ""
   property bool pointerHovered: hoverHandler.hovered
 
@@ -111,7 +114,7 @@ BorderSurface {
           text: String(root.message.from || (root.note ? "Note" : root.bot ? "Bot" : "Customer"))
           color: root.teammate ? root.accent : root.foreground
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           font.bold: true
           font.italic: root.note
           wrapMode: Text.WordWrap
@@ -127,7 +130,7 @@ BorderSurface {
           text: String(root.message.email || "")
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           wrapMode: Text.WrapAnywhere
         }
       }
@@ -138,7 +141,7 @@ BorderSurface {
         text: root.badge
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
         font.bold: true
       }
 
@@ -148,7 +151,7 @@ BorderSurface {
         text: root.timeLabel
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
       }
     }
 
@@ -170,7 +173,7 @@ BorderSurface {
           color: root.note || root.bot ? root.dim : root.foreground
           linkColor: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: root.themeFont.bodySmall
           font.italic: root.note
           wrapMode: Text.WordWrap
           textFormat: Text.StyledText

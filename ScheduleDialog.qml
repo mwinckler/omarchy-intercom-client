@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import qs.Commons
 import qs.Ui
@@ -5,12 +7,14 @@ import "Model.js" as Model
 
 FocusScope {
   id: root
+  readonly property var themeFont: Style.font
+  readonly property var popupColors: Color.popups
 
   property bool open: false
   property color foreground: Color.foreground
   property color accent: Color.accent
   property color urgent: Color.urgent
-  property string fontFamily: Style.font.family
+  property string fontFamily: root.themeFont.family
   property bool monthFirst: false
   property int weekStart: 1
 
@@ -341,7 +345,7 @@ FocusScope {
     anchors.centerIn: parent
     width: Math.min(parent.width - Style.space(24), Style.space(380))
     implicitHeight: inner.implicitHeight + Style.space(24)
-    color: Color.popups.background
+    color: root.popupColors.background
     borderSpec: Border.controlSpec("focus", root.foreground, root.accent)
     radius: Style.cornerRadius
     padding: Style.space(12)
@@ -364,7 +368,7 @@ FocusScope {
         text: root.confirming ? "Send later?" : "Send later"
         color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: root.themeFont.body
         font.bold: true
       }
 
@@ -374,7 +378,7 @@ FocusScope {
         text: "Schedule this reply for " + root.pendingLabel + "?"
         color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: root.themeFont.bodySmall
         wrapMode: Text.WordWrap
       }
 
@@ -395,7 +399,7 @@ FocusScope {
             foreground: root.foreground
             accent: root.accent
             fontFamily: root.fontFamily
-            fontSize: Style.font.caption
+            fontSize: root.themeFont.caption
             Keys.onPressed: function(event) { event.accepted = root.handleDialogKey(event) }
             onClicked: { if (root.usePicker) root.togglePicker() }
           }
@@ -409,7 +413,7 @@ FocusScope {
             foreground: root.foreground
             accent: root.accent
             fontFamily: root.fontFamily
-            fontSize: Style.font.caption
+            fontSize: root.themeFont.caption
             Keys.onPressed: function(event) { event.accepted = root.handleDialogKey(event) }
             onClicked: { if (!root.usePicker) root.togglePicker() }
           }
@@ -458,7 +462,7 @@ FocusScope {
               text: Qt.locale().monthName(root.viewMonth, Locale.LongFormat) + " " + root.viewYear
               color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: root.themeFont.bodySmall
               font.bold: true
               horizontalAlignment: Text.AlignHCenter
               verticalAlignment: Text.AlignVCenter
@@ -490,7 +494,7 @@ FocusScope {
                 text: root.weekdayLabel(modelData)
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: root.themeFont.caption
                 horizontalAlignment: Text.AlignHCenter
               }
             }
@@ -532,14 +536,16 @@ FocusScope {
             model: root.weeks
 
             Row {
+              id: calendarWeek
               required property var modelData
               width: parent.width
               spacing: 0
 
               Repeater {
-                model: modelData
+                model: calendarWeek.modelData
 
                 Item {
+                  id: calendarDay
                   required property var modelData
                   width: Math.floor(inner.width / 7)
                   height: Style.space(28)
@@ -560,19 +566,19 @@ FocusScope {
 
                   Text {
                     anchors.centerIn: parent
-                    text: String(modelData.day)
-                    color: modelData.inMonth ? (parent.chosen ? root.accent : root.foreground) : root.alpha(root.dim, 0.45)
+                    text: String(calendarDay.modelData.day)
+                    color: calendarDay.modelData.inMonth ? (parent.chosen ? root.accent : root.foreground) : root.alpha(root.dim, 0.45)
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    font.pixelSize: root.themeFont.caption
                     font.bold: parent.chosen
                   }
 
                   MouseArea {
                     anchors.fill: parent
-                    enabled: modelData.inMonth
+                    enabled: calendarDay.modelData.inMonth
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                      root.selectDay(modelData)
+                      root.selectDay(calendarDay.modelData)
                       calendarGrid.forceActiveFocus()
                     }
                   }
@@ -590,7 +596,7 @@ FocusScope {
               text: "Time"
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: root.themeFont.caption
               anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -614,7 +620,7 @@ FocusScope {
               text: ":"
               color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: root.themeFont.body
               anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -642,7 +648,7 @@ FocusScope {
           text: "Will send " + root.parsed.label
           color: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           wrapMode: Text.WordWrap
         }
 
@@ -652,7 +658,7 @@ FocusScope {
           text: root.parsed.error
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           wrapMode: Text.WordWrap
         }
 
@@ -662,7 +668,7 @@ FocusScope {
           text: root.parsed.error
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: root.themeFont.caption
           wrapMode: Text.WordWrap
         }
       }
@@ -673,7 +679,7 @@ FocusScope {
         text: root.errorText
         color: root.urgent
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: root.themeFont.caption
         wrapMode: Text.WordWrap
       }
 
@@ -688,7 +694,7 @@ FocusScope {
           foreground: root.foreground
           accent: root.accent
           fontFamily: root.fontFamily
-          fontSize: Style.font.caption
+          fontSize: root.themeFont.caption
           Keys.onPressed: function(event) { event.accepted = root.handleDialogKey(event) }
           onClicked: root.requestCancel()
         }
@@ -702,7 +708,7 @@ FocusScope {
           foreground: root.foreground
           accent: root.accent
           fontFamily: root.fontFamily
-          fontSize: Style.font.caption
+          fontSize: root.themeFont.caption
           Keys.onPressed: function(event) { event.accepted = root.handleDialogKey(event) }
           onClicked: root.confirming ? root.confirmPending() : root.commitParse()
         }

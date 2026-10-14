@@ -233,6 +233,7 @@ class FetchTests(unittest.TestCase):
         }
         parsed = FETCH.parse_search(payload, "US", "ws", 20)
         self.assertEqual(parsed["waitingCount"], 2)
+        self.assertTrue(all(row["state"] == "open" for row in parsed["conversations"]))
         self.assertEqual([row["id"] for row in parsed["conversations"]], ["2", "1"])
         self.assertEqual(parsed["conversations"][0]["title"], "Later")
         self.assertEqual(parsed["conversations"][0]["snippet"], "Hi")

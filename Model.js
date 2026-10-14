@@ -405,6 +405,10 @@ function conversationStateOf(value) {
   return "open"
 }
 
+function conversationIsOpen(value) {
+  return textValue(objectValue(value).state).trim().toLowerCase() === "open"
+}
+
 function copyConversation(value) {
   var row = objectValue(value)
   var copy = {}
@@ -893,6 +897,9 @@ function parseDiskCache(raw) {
   if (waiting.state === undefined && parsed.conversations !== undefined)
     waiting = parsed
   var conversations = normalizeConversationList(waiting.conversations)
+  for (var i = 0; i < conversations.length; i++) {
+    if (conversations[i].state === "") conversations[i].state = "open"
+  }
   var state = textValue(waiting.state, textValue(parsed.state))
   var hasInboxCounts = waiting.closedCount !== undefined
     || waiting.snoozedCount !== undefined
@@ -1178,7 +1185,7 @@ function copyIdMap(value) {
   return next
 }
 
-// Message identities, not Intercom's read/waiting flags, determine local unread state.
+// Only open conversations can be unread; message identities determine which messages.
 function normalizeLocalReadState(value) {
   var source = copyIdMap(value)
   var next = {}
@@ -1223,6 +1230,10 @@ function updateLocalReadState(value, conversation, read, ownEmail) {
   var next = normalizeLocalReadState(value)
   var conv = normalizeConversation(conversation)
   if (!isSafeConversationId(conv.id)) return next
+  if (!conversationIsOpen(conv)) {
+    next = markConversationRead(next, conv.id)
+    read = true
+  }
   var known = objectValue(next[conv.id])
   var email = textValue(ownEmail).trim().toLowerCase()
   for (var i = 0; i < conv.messages.length; i++) {
@@ -1234,6 +1245,52 @@ function updateLocalReadState(value, conversation, read, ownEmail) {
     if (read || !Object.prototype.hasOwnProperty.call(known, key)) known[key] = !!read
   }
   next[conv.id] = known
+  return next
+}
+
+// Migrate old cached unread flags using the freshest known conversation status.
+function restoreLocalReadState(snapshot) {
+  var row = objectValue(snapshot)
+  var next = normalizeLocalReadState(row.localReadState)
+  var latest = {}
+  function consider(conversation, fetchedAt, fallbackState) {
+    var conv = normalizeConversation(conversation)
+    if (!isSafeConversationId(conv.id)) return
+    if (conv.state === "") conv.state = fallbackState || ""
+    if (conv.state === "") return
+    var at = numberValue(fetchedAt, 0)
+    if (!latest[conv.id] || at >= latest[conv.id].at)
+      latest[conv.id] = { at: at, open: conversationIsOpen(conv) }
+  }
+  // Legacy waiting summaries omitted state, but came from the open-only query.
+  var waiting = arrayValue(row.conversations)
+  for (var i = 0; i < waiting.length; i++) consider(waiting[i], 0, "open")
+  var inboxes = parseInboxCache(row.inboxes)
+  for (var source in inboxes) {
+    var snap = inboxes[source]
+    for (var j = 0; j < snap.conversations.length; j++)
+      consider(snap.conversations[j], snap.fetchedAt, source === "all" ? "" : source)
+  }
+  var threads = parseThreadCache(row.threads)
+  for (var id in threads)
+    consider(threads[id].conversation, threads[id].fetchedAt)
+  for (var key in next) {
+    if (!latest[key] || !latest[key].open) next = markConversationRead(next, key)
+  }
+  return next
+}
+
+// A successful Open inbox response contains every page, not just waiting threads.
+function reconcileOpenReadState(value, conversations) {
+  var next = normalizeLocalReadState(value)
+  var open = {}
+  var rows = arrayValue(conversations)
+  for (var i = 0; i < rows.length; i++) {
+    if (conversationIsOpen(rows[i])) open[rows[i].id] = true
+  }
+  for (var id in next) {
+    if (!open[id]) next = markConversationRead(next, id)
+  }
   return next
 }
 
@@ -1272,7 +1329,8 @@ function includeUnreadConversations(conversations, lists, readState) {
   }
   var missing = []
   for (var id in extra) {
-    if (Object.prototype.hasOwnProperty.call(extra, id)) missing.push(extra[id])
+    if (Object.prototype.hasOwnProperty.call(extra, id) && conversationIsOpen(extra[id]))
+      missing.push(extra[id])
   }
   missing.sort(function(a, b) { return b.updatedAt - a.updatedAt })
   return missing.concat(rows)
