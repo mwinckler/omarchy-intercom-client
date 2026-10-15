@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "intercom-notifier",
+  "id": "omarchy-intercom-client",
   "name": "Intercom notifier",
   "version": "1.1.0",
   "author": "mattw",
@@ -27,7 +27,7 @@
         "type": "path",
         "label": "Access token file",
         "defaultValue": "",
-        "description": "Optional path to a file containing your Intercom OAuth access token. Defaults to ~/.config/omarchy/intercom-notifier/token. The INTERCOM_ACCESS_TOKEN environment variable wins if set."
+        "description": "Optional path to a file containing your Intercom OAuth access token. Defaults to ~/.config/omarchy/omarchy-intercom-client/token. The INTERCOM_ACCESS_TOKEN environment variable wins if set."
       },
       {
         "key": "refreshIntervalSec",

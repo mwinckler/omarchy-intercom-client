@@ -13,8 +13,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "intercom-notifier"
-  ipcTarget: "intercom-notifier"
+  moduleName: "omarchy-intercom-client"
+  ipcTarget: "omarchy-intercom-client"
   manageIpc: false
 
   // The shell exposes these extensible objects as QtObject, without member types.

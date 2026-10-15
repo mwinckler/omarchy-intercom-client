@@ -84,7 +84,7 @@ def default_token_path() -> str:
     config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
         os.path.expanduser("~"), ".config"
     )
-    return os.path.join(config_home, "omarchy", "intercom-notifier", "token")
+    return os.path.join(config_home, "omarchy", "omarchy-intercom-client", "token")
 
 
 def plugin_token_path() -> str:
@@ -606,7 +606,7 @@ def download_attachment(raw: object) -> dict:
         if not isinstance(parsed, dict) or not image_url(parsed.get("url")):
             raise ValueError("Attachment URL is not a valid HTTP(S) URL.")
         destination = local_attachment_path(parsed.get("path"))
-        request = urllib.request.Request(parsed["url"], headers={"User-Agent": "intercom-notifier"})
+        request = urllib.request.Request(parsed["url"], headers={"User-Agent": "omarchy-intercom-client"})
         opener = urllib.request.build_opener(AttachmentRedirectHandler())
         started = time.monotonic()
         with opener.open(request, timeout=TIMEOUT_SEC) as response:

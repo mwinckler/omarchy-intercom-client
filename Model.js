@@ -1585,8 +1585,8 @@ function shellQuote(value) {
 
 function notificationExec(conv) {
   var id = conversationId(conv)
-  if (id === "") return "omarchy-shell intercom-notifier open"
-  return "omarchy-shell intercom-notifier conversation " + shellQuote(id)
+  if (id === "") return "omarchy-shell omarchy-intercom-client open"
+  return "omarchy-shell omarchy-intercom-client conversation " + shellQuote(id)
 }
 
 function notificationCommand(conv) {

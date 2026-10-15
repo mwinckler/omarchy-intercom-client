@@ -138,7 +138,7 @@ Item {
     var home = String(Quickshell.env("HOME") || "").trim()
     var base = xdg !== "" ? xdg : (home !== "" ? home + "/.config" : "")
     if (base === "") return ""
-    return base + "/omarchy/intercom-notifier"
+    return base + "/omarchy/omarchy-intercom-client"
   }
 
   function fetchCommand() {

@@ -635,8 +635,8 @@ assert.ok(model.notificationBody({ snippet: "x".repeat(200) }).endsWith("…"));
 assert.ok(model.notificationBody({ snippet: "x".repeat(200) }).length <= 120);
 assert.equal(model.shellQuote("1295"), "'1295'");
 assert.equal(model.shellQuote("a'b"), "'a'\\''b'");
-assert.equal(model.notificationExec({ id: "1295" }), "omarchy-shell intercom-notifier conversation '1295'");
-assert.equal(model.notificationExec({}), "omarchy-shell intercom-notifier open");
+assert.equal(model.notificationExec({ id: "1295" }), "omarchy-shell omarchy-intercom-client conversation '1295'");
+assert.equal(model.notificationExec({}), "omarchy-shell omarchy-intercom-client open");
 const notifyCmd = model.notificationCommand({
   id: "1295",
   from: "Ada",
@@ -644,7 +644,7 @@ const notifyCmd = model.notificationCommand({
 });
 assert.equal(notifyCmd[0], "omarchy-notification-send");
 assert.equal(notifyCmd[notifyCmd.indexOf("--app-name") + 1], "Intercom");
-assert.equal(notifyCmd[notifyCmd.indexOf("--exec") + 1], "omarchy-shell intercom-notifier conversation '1295'");
+assert.equal(notifyCmd[notifyCmd.indexOf("--exec") + 1], "omarchy-shell omarchy-intercom-client conversation '1295'");
 assert.equal(notifyCmd[notifyCmd.length - 2], "Ada");
 assert.equal(notifyCmd[notifyCmd.length - 1], "Please help");
 

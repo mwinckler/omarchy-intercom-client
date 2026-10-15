@@ -1265,7 +1265,7 @@ class FetchTests(unittest.TestCase):
     def test_save_token_writes_mode_600(self):
         os.environ.pop("INTERCOM_ACCESS_TOKEN", None)
         with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "intercom-notifier", "token")
+            path = os.path.join(folder, "omarchy-intercom-client", "token")
             result = FETCH.save_token("  secret-token  \n", path)
             self.assertEqual(result["state"], "saved")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
