@@ -7,6 +7,7 @@ cd -- "$repo_root"
 
 node tests/model.test.mjs
 PYTHONDONTWRITEBYTECODE=1 python3 tests/fetch.test.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/file-picker.test.py
 omarchy plugin validate "$repo_root"
 
 bash tests/lint.sh

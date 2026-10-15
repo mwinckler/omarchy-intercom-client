@@ -8,6 +8,7 @@ The plugin includes the following features:
 - Status bar icon indicating how many conversations are waiting for a reply (any conversation where the last reply was not a team member), how many total conversations are open, and whether there new messages you haven't seen yet
 - A pane showing a list of conversations matching the current filter (Open, Waiting (for reply), Closed, Snoozed, or All) and the ability to navigate through conversations and view all messages in them
 - An inline editor to reply to a conversation (or add a private note) using Markdown
+- Download message attachments and attach local files to replies or notes
 - The ability to schedule replies for a future date instead of sending right away (handy for answering customer support in the middle of the night while not wanting to give customers the impression that you're available at all hours)
 
 
@@ -123,6 +124,39 @@ US, EU, and AU API hosts are tried automatically. The region that succeeds is ca
 - Inbox filters fetch every API page: all open conversations appear in Open,
   regardless of age or count. The API's 150-row page size is not a display limit.
 
+### Attachments
+
+Messages show attached files with their names, types, and sizes when available.
+Click **Download** on a file or image and choose where to save it. Downloads do
+not send your Intercom API token and never open or execute the saved file.
+The download limit is 100 MiB. If an attachment URL has expired, refresh the
+conversation (`r`) and try again.
+
+In the composer, click **Attach…** or press **Ctrl+O** to select files. Use
+**Remove** to detach a file before sending. Replies and private notes can contain
+up to 10 files, totaling at most 20 MiB; text is optional. Files are uploaded
+directly to Intercom when you send, not when you select them. Failed sends keep
+the selected files so you can retry.
+
+Drafts and scheduled replies retain the selected local file paths. Keep those
+files in place and unchanged until sending; they are read at send time, not
+copied into the draft or uploaded ahead of time. Missing, unreadable, or oversized
+files prevent the entire message from being sent.
+
+Attachment pickers use your system's default file chooser through XDG Desktop
+Portal (GTK on a standard Omarchy install). A separate helper talks to the portal,
+so native chooser code never loads inside Quickshell. The panel releases input
+while the picker is open and restores focus when it closes. Canceling or failing
+to open a picker keeps the draft and selected attachments intact.
+
+This requires the system Python's `python-gobject`, `xdg-desktop-portal`, and a
+FileChooser backend, normally already installed with Omarchy. Closing the panel
+also cancels its picker; it does not leave a dialog running in the background.
+
+Attachment names are included in local search. Cached conversations gain file
+attachments when refreshed; **Sync all conversations** upgrades older archive
+records without downloading the files themselves.
+
 ### Images
 
 The right-hand reader displays inline images and image attachments, including
@@ -136,7 +170,8 @@ visible portion of the selected thread. Other hosts (and known 1×1 images)
 require a click to load, so opening an email does not automatically fetch its
 external tracking images. No API token is sent with image requests. Local-file,
 data, and unresolved email `cid:` sources are not loaded. Previews are static;
-uploading images and animated playback are not supported.
+animated playback is not supported. Images can be uploaded using **Attach…**,
+just like other files.
 
 Image URLs can expire. If a preview fails, refresh the conversation (`r`) to
 obtain current URLs or open the original. Metadata is stored with the existing

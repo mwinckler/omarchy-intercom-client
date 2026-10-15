@@ -9,6 +9,43 @@ ShellRoot {
 
   property bool rowProbePassed: false
   property var probeService: null
+  property list<url> selectedUploads: ["file:///home/test/screen%20shot.png", "file:///home/test/log.txt"]
+  property int attachmentDialogStage: 0
+
+  function openAttachmentComposer() {
+    var conversation = { id: "picker-smoke", state: "open", messages: [] }
+    probeService.state = "ready"
+    probeService.workspaceId = "smoke"
+    probeService.threadCache = Model.writeCachedThread({}, conversation, Date.now())
+    probeService.openConversations = [conversation]
+    probeService.threadId = conversation.id
+    probeService.showThread(conversation)
+    probeService.messagesLoading = false
+    widget.expandConversationId = conversation.id
+    widget.openComposer()
+  }
+
+  function failDialogProbe(message) {
+    attachmentDialogProbe.stop()
+    console.error("intercom qml smoke failed:", message)
+    widget.close()
+    Qt.quit()
+  }
+
+  function pickerResponse(picker, response) {
+    for (var child of picker.data) {
+      if (typeof child.write !== "function") continue
+      if (String(child.command[0]) !== "/usr/bin/python3"
+          || String(child.command[1]).indexOf("/intercom-file-picker") < 0) {
+        shell.failDialogProbe("picker did not use the isolated system-portal helper")
+        return false
+      }
+      child.write(JSON.stringify(response) + "\n")
+      return true
+    }
+    shell.failDialogProbe("missing file picker subprocess")
+    return false
+  }
 
   function draftStyleMatches(row, highlighted) {
     if (!row || !row.draft || row.border.width !== 0
@@ -94,7 +131,9 @@ ShellRoot {
       email: "ada@example.com",
       kind: "customer",
       createdAt: 1700000000,
-      body: "Please <b>help</b> with <i>billing</i><br>See <a href=\"https://example.com\">this</a>"
+      body: "Please <b>help</b> with <i>billing</i><br>See <a href=\"https://example.com\">this</a>",
+      blocks: [{ type: "text", text: "Message with attachment" },
+        { type: "attachment", url: "https://example.com/file.pdf", name: "Invoice.pdf", contentType: "application/pdf", size: 1200 }]
     })
     timeLabel: "2h"
   }
@@ -199,12 +238,66 @@ ShellRoot {
         return
       }
       widget.openComposer()
+      var upload = widget.uploadDialog
+      var save = widget.saveAttachmentDialog
+      if (!upload || !save) {
+        console.error("intercom qml smoke failed: attachment dialogs missing")
+        Qt.quit()
+        return
+      }
+      if (upload.mode !== "open" || save.mode !== "save") {
+        console.error("intercom qml smoke failed: incorrect system picker mode")
+        Qt.quit()
+        return
+      }
       if (!widget.composing || !draftRow.note || !draftStyleMatches(draftRow, false)) {
         console.error("intercom qml smoke failed: live draft preview styling")
         Qt.quit()
         return
       }
       widget.stopComposing(true)
+      service.drafts = Model.setDraft({}, draftConversationId, "", true, ["/home/test/log.txt"])
+      widget.openComposer()
+      widget.attachmentConversationId = widget.replyConversationId
+      widget.addAttachments(shell.selectedUploads)
+      if (!widget.composing || widget.replyAttachments.length !== 2 || !widget.replyAsNote
+          || widget.threadDraftHtml.indexOf("screen shot.png") < 0) {
+        console.error("intercom qml smoke failed: attachment-only draft or QML file URL sequence")
+        Qt.quit()
+        return
+      }
+      widget.closeComposer()
+      widget.openComposer()
+      if (widget.replyAttachments.length !== 2 || !widget.selectedHasDraft) {
+        console.error("intercom qml smoke failed: attachments did not survive closing composer")
+        Qt.quit()
+        return
+      }
+      widget.commitScheduledReply(Date.now() + 3600000)
+      var pending = Model.scheduledForConversation(service.scheduled, draftConversationId)
+      if (widget.composing || pending.length !== 1 || pending[0].attachments.length !== 2) {
+        console.error("intercom qml smoke failed: attachment-only scheduling")
+        Qt.quit()
+        return
+      }
+      widget.editScheduledMessage(pending[0].id)
+      if (!widget.composing || widget.replyAttachments.length !== 2 || service.scheduled.length !== 0) {
+        console.error("intercom qml smoke failed: editing scheduled attachments")
+        Qt.quit()
+        return
+      }
+      service.replySent("another-conversation")
+      if (!widget.composing || widget.replyAttachments.length !== 2) {
+        console.error("intercom qml smoke failed: background send cleared another composer")
+        Qt.quit()
+        return
+      }
+      service.replySent(draftConversationId)
+      if (widget.composing || widget.replyAttachments.length || Model.hasDraft(service.drafts, draftConversationId)) {
+        console.error("intercom qml smoke failed: attachments retained after successful send")
+        Qt.quit()
+        return
+      }
       service.scheduled = [{
         id: "scheduled-smoke", conversationId: draftConversationId,
         body: "Scheduled smoke reply", note: false, sendAt: Date.now() + 3600000
@@ -300,8 +393,84 @@ ShellRoot {
         Qt.quit()
         return
       }
-      console.log("intercom qml smoke passed", widget.width, widget.height)
-      Qt.quit()
+      widget.open()
+      service.drafts = Model.setDraft({}, "picker-smoke", "Picker draft", true, ["/home/test/log.txt"])
+      shell.openAttachmentComposer()
+      widget.chooseAttachments()
+      attachmentDialogProbe.start()
+    }
+  }
+
+  Timer {
+    id: attachmentDialogProbe
+    interval: 200
+    repeat: true
+    onTriggered: {
+      var stage = shell.attachmentDialogStage++
+      if (stage === 0) {
+        if (!widget.fileDialogOpen || !widget.composing || !widget.uploadDialog.running) {
+          shell.failDialogProbe("system picker did not stay open with the composer")
+          return
+        }
+        widget.uploadDialog.close()
+        if (widget.fileDialogOpen || widget.replyAttachments.length !== 1
+            || widget.threadDraftBody !== "Picker draft" || !widget.replyAsNote) {
+          shell.failDialogProbe("canceling attachment picker changed the draft")
+          return
+        }
+      } else if (stage === 1) {
+        widget.chooseAttachments()
+      } else if (stage === 2) {
+        shell.pickerResponse(widget.uploadDialog, { state: "selected", files: [String(Qt.resolvedUrl("plugin/LICENSE"))] })
+      } else if (stage === 3) {
+        if (widget.fileDialogOpen || widget.replyAttachments.length !== 2
+            || widget.threadDraftBody !== "Picker draft" || !widget.replyAsNote) {
+          shell.failDialogProbe("system picker selection lost files or draft")
+          return
+        }
+        widget.chooseAttachmentDestination({ name: "../Invoice #1.pdf", url: "https://example.com/file" })
+      } else if (stage === 4) {
+        if (!widget.saveAttachmentDialog || !widget.saveAttachmentDialog.visible || !widget.opened) {
+          shell.failDialogProbe("system save picker did not stay open")
+          return
+        }
+        if (widget.saveAttachmentDialog.currentName !== "Invoice #1.pdf") {
+          shell.failDialogProbe("system save picker did not receive a safe suggested filename")
+          return
+        }
+        shell.pickerResponse(widget.saveAttachmentDialog, { state: "cancelled" })
+      } else if (stage === 5) {
+        widget.chooseAttachments()
+      } else if (stage === 6) {
+        widget.close()
+        if (widget.fileDialogOpen || widget.composing
+            || Model.draftEntry(shell.probeService.drafts, "picker-smoke").attachments.length !== 2) {
+          shell.failDialogProbe("closing panel with attachment picker lost the draft or left the picker open")
+        }
+      } else if (stage === 7) {
+        widget.open()
+        shell.openAttachmentComposer()
+        widget.chooseAttachments()
+      } else if (stage === 8) {
+        shell.pickerResponse(widget.uploadDialog, { state: "error", message: "Picker test failure" })
+      } else if (stage === 9) {
+        if (widget.fileDialogOpen || shell.probeService.replyMessage !== "Picker test failure"
+            || widget.replyAttachments.length !== 2) {
+          shell.failDialogProbe("system picker failure was not shown or lost attachments")
+          return
+        }
+        widget.chooseAttachmentDestination({ name: "file.pdf", url: "https://example.com/file" })
+      } else if (stage === 10) {
+        widget.close()
+      } else {
+        if (widget.fileDialogOpen || widget.opened) {
+          shell.failDialogProbe("closing panel left a file dialog open")
+          return
+        }
+        stop()
+        console.log("intercom qml smoke passed", widget.width, widget.height)
+        Qt.quit()
+      }
     }
   }
 }

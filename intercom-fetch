@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import html
+import http.client
 import json
+import mimetypes
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -21,7 +26,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 INTERCOM_VERSION = "2.14"
-CONTENT_VERSION = 2
+CONTENT_VERSION = 3
 UNSTABLE_VERSION = "Unstable"
 DEFAULT_LIMIT = 150
 SYNC_PAGE_SIZE = 150
@@ -29,6 +34,9 @@ MAX_SYNC_PAGES = 500
 SEARCH_LIMIT = 50
 SNIPPET_LIMIT = 240
 TIMEOUT_SEC = 15
+MAX_ATTACHMENTS = 10
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 LOGIN_TIMEOUT_SEC = 150
 OAUTH_PORT = 18741
 OAUTH_REDIRECT = f"http://localhost:{OAUTH_PORT}/callback"
@@ -497,16 +505,22 @@ def format_message_content(value: object, attachments: object = None) -> tuple[s
             continue
         mime = str(attachment.get("content_type") or "").lower().split(";", 1)[0].strip()
         path = urllib.parse.urlsplit(image_url(attachment.get("url"))).path.lower()
-        if not (mime.startswith("image/") or (not mime and re.search(r"\.(png|jpe?g|gif|webp|avif|bmp|svg)$", path))):
-            continue
+        is_image = mime.startswith("image/") or (not mime and re.search(r"\.(png|jpe?g|gif|webp|avif|bmp|svg)$", path))
         block = image_block(attachment)
         if not block:
             continue
+        if not is_image:
+            block = {
+                "type": "attachment", "url": block["url"],
+                "name": str(attachment.get("name") or urllib.parse.unquote(os.path.basename(urllib.parse.urlsplit(block["url"]).path)) or "Attachment"),
+                "contentType": mime,
+                "size": attachment_size(attachment.get("filesize")),
+            }
         key = image_asset_key(block["url"])
         existing = inline.get(key)
         if existing:
             for image in existing:
-                for field in ("name", "width", "height"):
+                for field in ("name", "width", "height") if is_image else ():
                     if not image.get(field):
                         image[field] = block[field]
             continue
@@ -514,10 +528,121 @@ def format_message_content(value: object, attachments: object = None) -> tuple[s
         blocks.append(block)
     if not text:
         text = "<br>".join(
-            html.escape("Image: " + (block["name"] or block["alt"])) if block["type"] == "image" else block["text"]
+            html.escape("Image: " + (block["name"] or block["alt"])) if block["type"] == "image"
+            else html.escape("Attachment: " + block["name"]) if block["type"] == "attachment" else block["text"]
             for block in blocks
         )
     return text, blocks if inline or re.search(r"<img\b", str(value or ""), re.I) else []
+
+
+def attachment_size(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def local_attachment_path(value: object) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("Choose a local file for the attachment.")
+    if value.startswith("file:"):
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.netloc not in ("", "localhost") or parsed.query or parsed.fragment:
+            raise ValueError("Choose a local file for the attachment.")
+        value = urllib.parse.unquote(parsed.path)
+    if not os.path.isabs(value) or "\x00" in value:
+        raise ValueError("Choose a local file for the attachment.")
+    return value
+
+
+def reply_attachment_files(raw: object) -> list[dict]:
+    """Read only explicitly selected regular files, with bounded memory use."""
+    try:
+        parsed = json.loads(str(raw or ""))
+    except (ValueError, TypeError):
+        return []
+    values = parsed.get("attachments", []) if isinstance(parsed, dict) else []
+    if not isinstance(values, list) or len(values) > MAX_ATTACHMENTS:
+        raise ValueError("Choose up to 10 attachments.")
+    files = []
+    total = 0
+    for value in values:
+        path = local_attachment_path(value)
+        name = os.path.basename(path)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError(f"Attachment is not a regular file: {name}")
+                if total + info.st_size > MAX_UPLOAD_BYTES:
+                    raise ValueError("Attachments must total 20 MiB or less.")
+                data = handle.read(MAX_UPLOAD_BYTES - total + 1)
+        except OSError:
+            raise ValueError(f"Could not read attachment: {name}. Select the file again.") from None
+        total += len(data)
+        if total > MAX_UPLOAD_BYTES:
+            raise ValueError("Attachments must total 20 MiB or less.")
+        files.append({
+            "name": name,
+            "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+            "data": base64.b64encode(data).decode("ascii"),
+        })
+    return files
+
+
+class AttachmentRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not image_url(newurl):
+            raise ValueError("Attachment redirected to an unsupported URL.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_attachment(raw: object) -> dict:
+    """Save to a user-selected destination; never send the API token or open files."""
+    temporary = ""
+    try:
+        parsed = json.loads(str(raw or ""))
+        if not isinstance(parsed, dict) or not image_url(parsed.get("url")):
+            raise ValueError("Attachment URL is not a valid HTTP(S) URL.")
+        destination = local_attachment_path(parsed.get("path"))
+        request = urllib.request.Request(parsed["url"], headers={"User-Agent": "intercom-notifier"})
+        opener = urllib.request.build_opener(AttachmentRedirectHandler())
+        started = time.monotonic()
+        with opener.open(request, timeout=TIMEOUT_SEC) as response:
+            if attachment_size(response.headers.get("Content-Length")) > MAX_DOWNLOAD_BYTES:
+                raise ValueError("Attachment exceeds the 100 MiB download limit.")
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(destination), prefix=".intercom-download-", delete=False) as handle:
+                temporary = handle.name
+                total = 0
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        raise ValueError("Attachment exceeds the 100 MiB download limit.")
+                    if time.monotonic() - started > 90:
+                        raise ValueError("Attachment download timed out. Try again.")
+                    handle.write(chunk)
+                expected = attachment_size(response.headers.get("Content-Length"))
+                if expected and total != expected:
+                    raise ValueError("Attachment download was incomplete. Try again.")
+            os.replace(temporary, destination)
+            temporary = ""
+        return result_payload("saved", "Saved attachment to " + destination)
+    except (ValueError, TypeError) as error:
+        return result_payload("error", str(error))
+    except urllib.error.HTTPError:
+        return result_payload("error", "Could not download attachment. Refresh the conversation for a current URL and try again.")
+    except (OSError, urllib.error.URLError, http.client.HTTPException):
+        return result_payload("error", "Could not download or save attachment. Check your connection and destination, or refresh the conversation and try again.")
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def truncate(value: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -1000,7 +1125,7 @@ def extract_messages(conv: dict) -> list[dict]:
         if not text:
             return
         # Signed URL query strings can change without this being a new message.
-        media_key = "|".join(image_identity(block["url"]) for block in blocks if block["type"] == "image")
+        media_key = "|".join(image_identity(block["url"]) for block in blocks if block["type"] in ("image", "attachment"))
         fallback = f"{created}:{text[:80]}" + (f":{media_key}" if media_key else "")
         key = str(message_id or "").strip() or fallback
         if key in seen:
@@ -2370,10 +2495,14 @@ def reply_conversation(token_file: str | None, conversation_id: str, markdown: o
     if not CONVERSATION_ID.fullmatch(conv_id):
         return result_payload("error", "Missing conversation id.")
     source, seen, as_note = parse_reply_request(markdown)
-    if not str(source or "").strip():
+    try:
+        files = reply_attachment_files(markdown)
+    except ValueError as error:
+        return result_payload("error", str(error))
+    if not str(source or "").strip() and not files:
         return result_payload("error", "Write a message before sending.")
     body = markdown_to_html(source)
-    if not body:
+    if not body and not files:
         return result_payload("error", "Write a message before sending.")
     config = load_config()
     last_error: ApiError | None = None
@@ -2420,11 +2549,14 @@ def reply_conversation(token_file: str | None, conversation_id: str, markdown: o
                 conversation=conversation,
             )
         try:
+            reply_body = admin_reply_body(admin_id, body, "note" if as_note else "comment")
+            if files:
+                reply_body["attachment_files"] = files
             payload = request_json(
                 f"{base}/conversations/{urllib.parse.quote(conv_id, safe='')}/reply",
                 token,
                 method="POST",
-                payload=admin_reply_body(admin_id, body, "note" if as_note else "comment"),
+                payload=reply_body,
             )
         except ApiError as error:
             last_error = error
@@ -2811,7 +2943,7 @@ def archive_row_haystack(row: dict) -> str:
             parts.extend([msg.get("body"), msg.get("from"), msg.get("email")])
             blocks = msg.get("blocks")
             for block in blocks if isinstance(blocks, list) else []:
-                if isinstance(block, dict) and block.get("type") == "image":
+                if isinstance(block, dict) and block.get("type") in ("image", "attachment"):
                     parts.extend([block.get("name"), block.get("alt")])
     return " ".join(str(part or "") for part in parts).lower()
 
@@ -2996,13 +3128,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="Save the last-viewed conversation id",
     )
+    # Signed URLs are supplied on stdin, not exposed in process arguments.
+    parser.add_argument("--download-attachment", action="store_true", help="Download an attachment using a JSON URL and destination on stdin")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     token_file = args.token_file.strip() or None
-    if args.save_oauth and args.login:
+    if args.download_attachment:
+        payload = download_attachment(sys.stdin.readline())
+    elif args.save_oauth and args.login:
         saved = save_oauth(sys.stdin.readline())
         payload = saved if saved.get("state") == "error" else oauth_login(token_file)
     elif args.save_oauth:

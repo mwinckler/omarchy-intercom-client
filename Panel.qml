@@ -2,9 +2,11 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import QtCore
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -33,6 +35,13 @@ Panel {
   property bool composing: false
   onComposingChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
   property bool replyAsNote: false
+  property var replyAttachments: []
+  property var pendingDownloadAttachment: ({})
+  property string attachmentConversationId: ""
+  readonly property FilePicker uploadDialog: uploadPicker
+  readonly property FilePicker saveAttachmentDialog: savePicker
+  readonly property bool fileDialogOpen: (uploadDialog !== null && uploadDialog.visible)
+    || (saveAttachmentDialog !== null && saveAttachmentDialog.visible)
   property string replyConversationId: ""
   property string pane: "list"
   property int inboxCursorIndex: 0
@@ -137,7 +146,7 @@ Panel {
   property string pendingCancelScheduledId: ""
   property string pendingCancelLabel: ""
   readonly property bool confirmOpen: root.cancelConfirmOpen
-  readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen
+  readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen || root.fileDialogOpen
   onOverlayOpenChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
 
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
@@ -567,7 +576,7 @@ Panel {
     if (clientSecretField) clientSecretField.text = ""
     restorePreferredPanel()
     Qt.callLater(function() {
-      if (root.opened) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -677,7 +686,7 @@ Panel {
     else root.syncInboxSelection()
     root.acknowledgeHighlightedConversation()
     Qt.callLater(function() {
-      if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.settingsOpen && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -772,7 +781,7 @@ Panel {
     root.scrollSearchIntoView()
     root.selectSearchHit()
     Qt.callLater(function() {
-      if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.settingsOpen && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
     return true
   }
@@ -955,14 +964,16 @@ Panel {
     if (root.searchOpen && !root.showingSelectedThread) return ""
     return Model.draftText(intercom.drafts, expandConversationId)
   }
-  readonly property string threadDraftHtml: Model.markdownToStyled(threadDraftBody)
+  readonly property var threadDraftAttachments: root.composing ? root.replyAttachments
+    : Model.localAttachments(Model.draftEntry(intercom.drafts, expandConversationId).attachments)
+  readonly property string threadDraftHtml: Model.composerPreview(threadDraftBody, threadDraftAttachments)
   readonly property bool threadDraftIsNote: root.composing
     ? root.replyAsNote
     : Model.draftIsNote(intercom.drafts, expandConversationId)
-  readonly property bool selectedHasDraft: Model.draftText(
+  readonly property bool selectedHasDraft: Model.hasDraft(
     intercom.drafts,
     expandConversationId
-  ) !== ""
+  )
   readonly property var threadScheduled: {
     if (root.searchOpen && !root.showingSelectedThread) return []
     return Model.scheduledForConversation(intercom.scheduled, expandConversationId)
@@ -1023,7 +1034,7 @@ Panel {
   function selectThreadItem(kind, id, index) {
     // A card click restores panel focus even after switching monitors/workspaces.
     root.compositorFocusLost = false
-    if (!root.composing && keyCatcher) keyCatcher.forceActiveFocus()
+    if (!root.composing && !root.fileDialogOpen && keyCatcher) keyCatcher.forceActiveFocus()
     pane = "thread"
     var items = root.threadFocusList
     var wantedKind = String(kind || "")
@@ -1107,6 +1118,7 @@ Panel {
     if (viewed !== "" && viewed !== id) return
     if (replyField) replyField.text = String(row.body || "")
     root.replyAsNote = !!row.note
+    root.replyAttachments = Model.localAttachments(row.attachments)
     intercom.replyMessage = ""
     replyConversationId = id
     composing = true
@@ -1114,13 +1126,13 @@ Panel {
     intercom.cancelScheduled(scheduledId)
     root.scrollThreadToEnd()
     Qt.callLater(function() {
-      if (root.opened && replyField) replyField.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen && replyField) replyField.forceActiveFocus()
     })
   }
 
   function saveComposerDraft() {
     if (!composing) return
-    intercom.saveDraft(replyConversationId, replyField ? replyField.text : "", root.replyAsNote)
+    intercom.saveDraft(replyConversationId, replyField ? replyField.text : "", root.replyAsNote, root.replyAttachments)
   }
 
   function stopComposing(clearDraft) {
@@ -1128,6 +1140,7 @@ Panel {
     replyConversationId = ""
     if (clearDraft && replyField) replyField.text = ""
     if (clearDraft) root.replyAsNote = false
+    if (clearDraft) root.replyAttachments = []
   }
 
   function keepReplyOnConversation(conversationId) {
@@ -1148,9 +1161,11 @@ Panel {
     if (String(replyConversationId || "") !== id && replyField) {
       replyField.text = draft
       root.replyAsNote = asNote
+      root.replyAttachments = Model.localAttachments(Model.draftEntry(intercom.drafts, id).attachments)
     } else if (replyField && String(replyField.text || "") === "" && draft !== "") {
       replyField.text = draft
       root.replyAsNote = asNote
+      root.replyAttachments = Model.localAttachments(Model.draftEntry(intercom.drafts, id).attachments)
     }
     intercom.replyMessage = ""
     replyConversationId = id
@@ -1158,7 +1173,7 @@ Panel {
     pane = "thread"
     root.scrollThreadToEnd()
     Qt.callLater(function() {
-      if (root.opened && replyField) replyField.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen && replyField) replyField.forceActiveFocus()
     })
   }
 
@@ -1168,7 +1183,7 @@ Panel {
     root.saveComposerDraft()
     root.stopComposing(true)
     Qt.callLater(function() {
-      if (root.opened) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -1181,7 +1196,7 @@ Panel {
     root.replyAsNote = false
     root.stopComposing(true)
     Qt.callLater(function() {
-      if (root.opened) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -1231,12 +1246,12 @@ Panel {
     if (root.settingsOpen) return
     if (root.composing) {
       var text = replyField ? String(replyField.text || "") : ""
-      var saved = Model.draftText(intercom.drafts, replyConversationId)
-      if (text.trim() === "" && saved === "") return
+      var saved = Model.hasDraft(intercom.drafts, replyConversationId)
+      if (text.trim() === "" && !root.replyAttachments.length && !saved) return
       root.discardComposerDraft()
       return
     }
-    if (Model.draftText(intercom.drafts, expandConversationId) === "") return
+    if (!Model.hasDraft(intercom.drafts, expandConversationId)) return
     root.discardThreadDraft()
   }
 
@@ -1252,7 +1267,43 @@ Panel {
       intercom.replyMessage = "Conversation changed; reply was not sent."
       return
     }
-    intercom.reply(id, replyField ? replyField.text : "", root.replyAsNote)
+    intercom.reply(id, replyField ? replyField.text : "", root.replyAsNote, root.replyAttachments)
+  }
+
+  function chooseAttachments() {
+    if (!root.composing || intercom.replying || root.fileDialogOpen || !uploadDialog) return
+    root.saveComposerDraft()
+    attachmentConversationId = replyConversationId
+    uploadDialog.open()
+  }
+
+  function addAttachments(files) {
+    if (!root.composing || intercom.replying || attachmentConversationId !== replyConversationId) return
+    var next = Model.localAttachments(root.replyAttachments.concat(Model.localAttachments(files)))
+    if (next.length > 10) {
+      intercom.replyMessage = "Choose up to 10 attachments."
+      return
+    }
+    root.replyAttachments = next
+    intercom.replyMessage = ""
+    root.saveComposerDraft()
+    root.scrollThreadToEnd()
+  }
+
+  function chooseAttachmentDestination(attachment) {
+    if (intercom.downloadingAttachment || root.fileDialogOpen || !saveAttachmentDialog) return
+    pendingDownloadAttachment = attachment
+    var folder = StandardPaths.writableLocation(StandardPaths.DownloadLocation)
+    var name = Model.downloadAttachmentName(attachment)
+    saveAttachmentDialog.currentFolder = folder
+    saveAttachmentDialog.currentName = name
+    saveAttachmentDialog.open()
+  }
+
+  function restoreDialogFocus() {
+    Qt.callLater(function() {
+      if (root.opened && !root.fileDialogOpen) root.stealPanelFocus()
+    })
   }
 
   function closeScheduleDialog() {
@@ -1282,7 +1333,7 @@ Panel {
     intercom.cancelScheduled(id)
     root.syncThreadFocus(true)
     Qt.callLater(function() {
-      if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.settingsOpen && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -1291,8 +1342,8 @@ Panel {
     if (root.scheduleOpen) return
     root.closeConfirmDialog()
     var text = replyField ? String(replyField.text || "") : ""
-    if (text.replace(/\s+/g, "").trim() === "") {
-      intercom.replyMessage = "Write a message before sending."
+    if (text.trim() === "" && !root.replyAttachments.length) {
+      intercom.replyMessage = "Write a message or attach a file before sending."
       return
     }
     var id = String(replyConversationId || "").trim()
@@ -1310,13 +1361,13 @@ Panel {
 
   function commitScheduledReply(sendAt) {
     var id = String(replyConversationId || "").trim()
-    if (!intercom.scheduleReply(id, replyField ? replyField.text : "", root.replyAsNote, sendAt))
+    if (!intercom.scheduleReply(id, replyField ? replyField.text : "", root.replyAsNote, sendAt, root.replyAttachments))
       return
     if (replyField) replyField.text = ""
     intercom.discardDraft(id)
     root.stopComposing(true)
     Qt.callLater(function() {
-      if (root.opened) keyCatcher.forceActiveFocus()
+      if (root.opened && !root.fileDialogOpen) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -1371,6 +1422,7 @@ Panel {
       restorePreferredPanel()
       root.prefetchVisibleThreads()
       Qt.callLater(function() {
+        if (root.fileDialogOpen) return
         if (root.settingsOpen) {
           root.focusSettingsField()
         } else if (root.searchOpen) {
@@ -1382,10 +1434,54 @@ Panel {
       })
     } else {
       compositorFocusLost = false
+      if (uploadDialog && uploadDialog.visible) uploadDialog.close()
+      if (saveAttachmentDialog && saveAttachmentDialog.visible) saveAttachmentDialog.close()
       intercom.stopPrefetch()
       root.closeComposer()
       if (!root.needsSetup) showingSettings = false
     }
+  }
+
+  FilePicker {
+    id: uploadPicker
+    pluginRoot: intercom.pluginRoot
+    onSelected: function(files) {
+      root.addAttachments(files)
+      root.restoreDialogFocus()
+    }
+    onRejected: root.restoreDialogFocus()
+    onFailed: function(message) {
+      intercom.replyMessage = message
+      root.restoreDialogFocus()
+    }
+  }
+
+  FilePicker {
+    id: savePicker
+    pluginRoot: intercom.pluginRoot
+    mode: "save"
+    onSelected: function(files) {
+      intercom.downloadAttachment(root.pendingDownloadAttachment, files[0])
+      root.pendingDownloadAttachment = ({})
+      root.restoreDialogFocus()
+    }
+    onRejected: {
+      root.pendingDownloadAttachment = ({})
+      root.restoreDialogFocus()
+    }
+    onFailed: function(message) {
+      root.pendingDownloadAttachment = ({})
+      intercom.attachmentMessage = message
+      root.restoreDialogFocus()
+    }
+  }
+
+  // Release the overlay's input while the system picker is in another process.
+  Binding {
+    target: keyCatcher.Window.window ? keyCatcher.Window.window.contentItem : null
+    property: "opacity"
+    when: root.fileDialogOpen
+    value: 0
   }
 
   Service {
@@ -1417,8 +1513,10 @@ Panel {
       root.showingSettings = false
       root.restorePreferredPanel()
     }
-    onReplySent: {
+    onReplySent: function(conversationId) {
+      if (conversationId !== root.replyConversationId) return
       if (replyField) replyField.text = ""
+      root.replyAttachments = []
       root.closeComposer()
     }
     onConversationClosed: function(conversationId) {
@@ -1462,7 +1560,7 @@ Panel {
   }
 
   function restorePanelKeyboardTarget() {
-    if (!root.opened) return
+    if (!root.opened || root.fileDialogOpen) return
     if (root.settingsOpen) {
       root.focusSettingsField()
       return
@@ -1682,7 +1780,13 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: root.fileDialogOpen ? null : keyCatcher
+    WlrLayershell.keyboardFocus: root.fileDialogOpen || !open ? WlrKeyboardFocus.None
+      : focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive
+    mask: Region {
+      width: root.fileDialogOpen ? 0 : panel.screenW
+      height: root.fileDialogOpen ? 0 : panel.screenH
+    }
     contentWidth: panel.fittedContentWidth(root.large ? Style.space(1400) : Style.space(920))
     contentHeight: panel.cappedContentHeight(root.large ? Style.space(980) : Style.space(700))
 
@@ -2464,7 +2568,7 @@ Panel {
                       ? root.searchResultUpdatedLabel(modelData)
                       : root.inboxRowUpdatedLabel(modelData)
                     selected: root.searchOpen ? root.searchCursorIndex === index : root.inboxCursorIndex === index
-                    hasDraft: Model.draftText(intercom.drafts, modelData.id) !== ""
+                    hasDraft: Model.hasDraft(intercom.drafts, modelData.id)
                     hasScheduled: Model.hasScheduled(intercom.scheduled, modelData.id)
                     foreground: root.foreground
                     accent: root.accent
@@ -2500,7 +2604,7 @@ Panel {
               anchors.top: parent.top
               anchors.left: parent.left
               anchors.right: parent.right
-              anchors.bottom: composerBox.top
+              anchors.bottom: attachmentStatus.top
               anchors.margins: Style.space(8)
               anchors.bottomMargin: root.composing ? Style.space(4) : Style.space(8)
               contentWidth: width
@@ -2550,6 +2654,7 @@ Panel {
                     width: threadColumn.width
                     message: modelData
                     imagesEnabled: root.opened && !root.settingsOpen && root.showingSelectedThread
+                    downloadingAttachment: intercom.downloadingAttachment
                     imageViewport: threadFlick
                     unread: Model.conversationIsOpen(intercom.thread)
                       && Model.messageUnread(intercom.localReadState, intercom.threadId, modelData)
@@ -2560,6 +2665,7 @@ Panel {
                     accent: root.accent
                     fontFamily: root.fontFamily
                     onActivated: root.selectThreadItem("message", modelData.id, index)
+                    onDownloadRequested: function(attachment) { root.chooseAttachmentDestination(attachment) }
                     onLinkActivated: function(url) {
                       if (Model.isSafeHttpUrl(url)) intercom.openUrl(url)
                     }
@@ -2630,7 +2736,7 @@ Panel {
                         from: Model.adminLabel(intercom.adminName, intercom.adminEmail, "You"),
                         email: String(intercom.adminEmail || ""),
                         kind: scheduledBlock.modelData.note ? "note" : "teammate",
-                        body: Model.markdownToStyled(scheduledBlock.modelData.body)
+                        body: Model.composerPreview(scheduledBlock.modelData.body, scheduledBlock.modelData.attachments)
                       })
                       badge: "LATER · " + Model.formatScheduleTime(scheduledBlock.modelData.sendAt)
                       selected: root.threadItemSelected("scheduled", scheduledBlock.modelData.id, scheduledBlock.index)
@@ -2660,6 +2766,23 @@ Panel {
                   }
                 }
               }
+            }
+
+            Text {
+              id: attachmentStatus
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: composerBox.top
+              anchors.leftMargin: Style.space(8)
+              anchors.rightMargin: Style.space(8)
+              height: visible ? implicitHeight : 0
+              visible: intercom.attachmentMessage !== ""
+              text: intercom.attachmentMessage
+              textFormat: Text.PlainText
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: root.themeFont.caption
+              wrapMode: Text.WrapAnywhere
             }
 
             Column {
@@ -2753,6 +2876,9 @@ Panel {
                     } else if (root.isComposerControlKey(event, Qt.Key_W)) {
                       root.deleteComposerLastWord()
                       event.accepted = true
+                    } else if (root.isComposerControlKey(event, Qt.Key_O)) {
+                      root.chooseAttachments()
+                      event.accepted = true
                     } else if (root.isComposerControlKey(event, Qt.Key_U)) {
                       root.deleteComposerLineBeforeCursor()
                       event.accepted = true
@@ -2768,10 +2894,61 @@ Panel {
                 }
               }
 
+              Flickable {
+                width: parent.width
+                height: Math.min(attachmentList.implicitHeight, Style.space(96))
+                visible: root.replyAttachments.length > 0
+                contentHeight: attachmentList.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                Column {
+                  id: attachmentList
+                  width: parent.width
+                  spacing: Style.space(4)
+                  Repeater {
+                    model: root.replyAttachments
+                    Row {
+                      id: pendingAttachmentRow
+                      required property string modelData
+                      required property int index
+                      width: attachmentList.width
+                      spacing: Style.space(6)
+                      Text {
+                        width: Math.max(0, parent.width - removeAttachmentButton.implicitWidth - parent.spacing)
+                        text: Model.attachmentName(pendingAttachmentRow.modelData)
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: root.themeFont.caption
+                        elide: Text.ElideMiddle
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+                      Button {
+                        id: removeAttachmentButton
+                        text: "Remove"
+                        enabled: !intercom.replying
+                        foreground: root.foreground
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        fontSize: root.themeFont.caption
+                        onClicked: {
+                          var files = root.replyAttachments.slice()
+                          files.splice(pendingAttachmentRow.index, 1)
+                          root.replyAttachments = files
+                          root.saveComposerDraft()
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
               Text {
                 width: parent.width
                 visible: intercom.replyMessage !== ""
                 text: intercom.replyMessage
+                textFormat: Text.PlainText
                 color: root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: root.themeFont.caption
@@ -2809,19 +2986,34 @@ Panel {
                   onClicked: root.openScheduleDialog()
                 }
 
+                Button {
+                  id: attachButton
+                  text: "Attach…"
+                  tooltipText: "Ctrl+O"
+                  bordered: true
+                  enabled: !intercom.replying
+                  foreground: root.foreground
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  fontSize: root.themeFont.caption
+                  onClicked: root.chooseAttachments()
+                }
+
                 Item {
                   width: Math.max(0, parent.width
                     - sendNowButton.implicitWidth
                     - sendLaterButton.implicitWidth
+                    - attachButton.implicitWidth
                     - (discardDraftButton.visible ? discardDraftButton.implicitWidth + parent.spacing : 0)
-                    - parent.spacing * (discardDraftButton.visible ? 3 : 2))
+                    - parent.spacing * (discardDraftButton.visible ? 4 : 3))
                   height: 1
                 }
 
                 Button {
                   id: discardDraftButton
                   visible: String(replyField.text || "").trim() !== ""
-                    || Model.draftText(intercom.drafts, root.replyConversationId) !== ""
+                    || root.replyAttachments.length > 0
+                    || Model.hasDraft(intercom.drafts, root.replyConversationId)
                   text: "Discard"
                   tooltipText: "Ctrl+Shift+D"
                   bordered: true
@@ -2837,7 +3029,7 @@ Panel {
                 width: parent.width
                 text: intercom.replying
                   ? "Sending…"
-                  : "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
+                  : "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Ctrl+O attach  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: root.themeFont.caption

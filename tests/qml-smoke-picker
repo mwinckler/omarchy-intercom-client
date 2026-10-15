@@ -1,0 +1,16 @@
+#!/usr/bin/python3
+"""Simulate a portal response on stdin, without opening a real desktop dialog."""
+import json
+import signal
+import sys
+
+
+def cancelled(*args):
+    print(json.dumps({"state": "cancelled"}), flush=True)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, cancelled)
+request = json.loads(sys.stdin.readline())
+response = sys.stdin.readline()
+print(response if response else json.dumps({"state": "cancelled"}), flush=True)

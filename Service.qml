@@ -25,6 +25,8 @@ Item {
   property bool signingIn: false
   property bool signingOut: false
   property bool replying: false
+  property bool downloadingAttachment: false
+  property string attachmentMessage: ""
   property bool closing: false
   property bool reopening: false
   property string replyMessage: ""
@@ -87,7 +89,7 @@ Item {
 
   signal tokenSaved()
   signal signedOut()
-  signal replySent()
+  signal replySent(string conversationId)
   signal conversationClosed(string conversationId)
   signal conversationReopened(string conversationId)
   signal newWaitingMessages(var conversations)
@@ -104,7 +106,7 @@ Item {
   readonly property int refreshIntervalMs: intSetting("refreshIntervalSec", 60, 15, 3600) * 1000
   readonly property string tokenFile: String(setting("tokenFile", "")).trim()
   readonly property bool networkActive: loading || openLoading || messagesLoading
-    || prefetchProcess.running || replying || closing || reopening
+    || prefetchProcess.running || replying || downloadingAttachment || closing || reopening
     || (searching && searchRemoteActive) || syncing
     || signingIn || signingOut || savingToken
 
@@ -364,8 +366,8 @@ Item {
     return Model.draftText(drafts, conversationId)
   }
 
-  function saveDraft(conversationId, text, note) {
-    var next = Model.setDraft(drafts, conversationId, text, note)
+  function saveDraft(conversationId, text, note, attachments) {
+    var next = Model.setDraft(drafts, conversationId, text, note, attachments)
     drafts = next
     draftsLoaded = true
     persistDrafts()
@@ -398,7 +400,7 @@ Item {
     Qt.callLater(root.sendDueScheduled)
   }
 
-  function scheduleReply(conversationId, markdown, asNote, sendAt) {
+  function scheduleReply(conversationId, markdown, asNote, sendAt, attachments) {
     var id = String(conversationId || "").trim()
     var body = String(markdown || "")
     var at = Number(sendAt)
@@ -406,15 +408,15 @@ Item {
       replyMessage = "Select a conversation first."
       return false
     }
-    if (body.replace(/\s+/g, "").trim() === "") {
-      replyMessage = "Write a message before sending."
+    if (body.trim() === "" && !Model.localAttachments(attachments).length) {
+      replyMessage = "Write a message or attach a file before sending."
       return false
     }
     if (!isFinite(at) || at <= Date.now()) {
       replyMessage = "Choose a time in the future."
       return false
     }
-    scheduled = Model.addScheduled(scheduled, id, body, !!asNote, at, Date.now())
+    scheduled = Model.addScheduled(scheduled, id, body, !!asNote, at, Date.now(), attachments)
     scheduledLoaded = true
     persistScheduled()
     replyMessage = ""
@@ -433,7 +435,7 @@ Item {
     if (due.length === 0) return
     var item = due[0]
     _sendingScheduledId = String(item.id || "")
-    reply(item.conversationId, item.body, item.note)
+    reply(item.conversationId, item.body, item.note, item.attachments)
     if (!replying) _sendingScheduledId = ""
   }
 
@@ -961,6 +963,18 @@ Item {
     openUrl(inboxUrl)
   }
 
+  function downloadAttachment(attachment, destination) {
+    if (downloadProcess.running) return
+    var url = Model.safeImageUrl((attachment || {}).url)
+    if (url === "") return
+    downloadingAttachment = true
+    attachmentMessage = "Downloading attachment…"
+    _downloadSecret = JSON.stringify({ url: url, path: String(destination || "") })
+    downloadProcess.command = [root.pluginRoot + "/intercom-fetch", "--download-attachment"]
+    downloadProcess.running = true
+    downloadWatchdog.restart()
+  }
+
   function saveToken(token, workspace) {
     var value = String(token || "").replace(/\s+/g, "").trim()
     var workspaceId = String(workspace || "").replace(/\s+/g, "").trim()
@@ -1071,15 +1085,15 @@ Item {
     logoutProcess.running = true
   }
 
-  function reply(conversationId, markdown, asNote) {
+  function reply(conversationId, markdown, asNote, attachments) {
     var id = String(conversationId || "").trim()
     var body = String(markdown || "")
     if (!Model.isSafeConversationId(id)) {
       replyMessage = "Select a conversation first."
       return
     }
-    if (body.replace(/\s+/g, "").trim() === "") {
-      replyMessage = "Write a message before sending."
+    if (body.trim() === "" && !Model.localAttachments(attachments).length) {
+      replyMessage = "Write a message or attach a file before sending."
       return
     }
     if (replyProcess.running) return
@@ -1093,7 +1107,8 @@ Item {
     replyMessage = ""
     _replyStdout = ""
     _replyStderr = ""
-    _replySecret = JSON.stringify({ body: body, seen: seen, note: !!asNote })
+    _replyConversationId = id
+    _replySecret = JSON.stringify({ body: body, seen: seen, note: !!asNote, attachments: Model.localAttachments(attachments) })
     replyProcess.command = withTokenFile([root.pluginRoot + "/intercom-fetch", "--reply", id])
     replyProcess.running = true
     replyWatchdog.restart()
@@ -1102,6 +1117,8 @@ Item {
   function applyReply(raw, exitCode) {
     var parsed = Model.parseFetch(raw)
     var scheduledId = String(_sendingScheduledId || "")
+    var requestedId = _replyConversationId
+    _replyConversationId = ""
     _sendingScheduledId = ""
     if (exitCode !== 0 && parsed.state === "error" && parsed.message === "Could not parse Intercom response.") {
       var stderr = String(_replyStderr || "").replace(/\s+/g, " ").trim()
@@ -1127,7 +1144,7 @@ Item {
       return
     }
     var conv = parsed.conversation || {}
-    var convId = String(conv.id || threadId || "")
+    var convId = String(conv.id || requestedId || "")
     if (String(conv.id || "") !== "") {
       threadCache = Model.writeCachedThread(threadCache, conv, Date.now())
       schedulePersistCache()
@@ -1142,7 +1159,8 @@ Item {
       Qt.callLater(root.sendDueScheduled)
       return
     }
-    root.replySent()
+    discardDraft(requestedId)
+    root.replySent(requestedId)
     refreshNow(convId)
   }
 
@@ -1472,6 +1490,8 @@ Item {
   property string _replyStdout: ""
   property string _replyStderr: ""
   property string _replySecret: ""
+  property string _replyConversationId: ""
+  property string _downloadSecret: ""
   property string _sendingScheduledId: ""
   property string _closeStdout: ""
   property string _closeStderr: ""
@@ -1656,10 +1676,35 @@ Item {
 
   Timer {
     id: replyWatchdog
-    interval: 45000
+    interval: 120000
     repeat: false
     onTriggered: {
       if (replyProcess.running) replyProcess.running = false
+    }
+  }
+
+  Timer {
+    id: downloadWatchdog
+    interval: 120000
+    onTriggered: { if (downloadProcess.running) downloadProcess.running = false }
+  }
+
+  Process {
+    id: downloadProcess
+    running: false
+    stdinEnabled: true
+    stdout: StdioCollector { id: downloadStdout; waitForEnd: true }
+    onStarted: {
+      write(root._downloadSecret + "\n")
+      root._downloadSecret = ""
+    }
+    onExited: function(exitCode) {
+      downloadWatchdog.stop()
+      root.downloadingAttachment = false
+      var parsed = Model.parseFetch(downloadStdout.text)
+      root.attachmentMessage = parsed.state === "saved" || parsed.state === "error"
+        ? parsed.message : "Could not download attachment. Try again."
+      if (exitCode !== 0) root.attachmentMessage = "Attachment download was interrupted. Try again."
     }
   }
 

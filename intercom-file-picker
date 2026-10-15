@@ -1,0 +1,143 @@
+#!/usr/bin/python3
+"""Ask the desktop portal for the system file picker, outside Quickshell."""
+
+import json
+import os
+import secrets
+import signal
+import sys
+import urllib.parse
+from pathlib import Path
+
+PORTAL = "org.freedesktop.portal.Desktop"
+DESKTOP = "/org/freedesktop/portal/desktop"
+REQUEST = "org.freedesktop.portal.Request"
+
+
+def local_path(value):
+    if not isinstance(value, str) or not value or "\0" in value:
+        raise ValueError("Choose a local file.")
+    if value.startswith("file:"):
+        url = urllib.parse.urlsplit(value)
+        if url.netloc not in ("", "localhost") or url.query or url.fragment:
+            raise ValueError("Choose a local file.")
+        value = urllib.parse.unquote(url.path)
+    if not os.path.isabs(value) or "\0" in value:
+        raise ValueError("Choose a local file.")
+    return value
+
+
+def selection(response, results, mode):
+    if response == 1:
+        return {"state": "cancelled"}
+    if response != 0:
+        return {"state": "error", "message": "The system file picker failed. Your draft has been kept."}
+    files = results.get("uris", [])
+    if not isinstance(files, (list, tuple)) or not files:
+        raise ValueError("The system file picker returned no files.")
+    if len(files) > (1 if mode == "save" else 10):
+        raise ValueError("Choose up to 10 attachments." if mode != "save" else "Choose one destination file.")
+    return {"state": "selected", "files": list(dict.fromkeys(Path(local_path(url)).as_uri() for url in files))}
+
+
+def portal_options(request, token, GLib):
+    mode = request.get("mode", "open")
+    if mode not in ("open", "save"):
+        raise ValueError("Unknown file picker mode.")
+    options = {"handle_token": GLib.Variant("s", token), "modal": GLib.Variant("b", True)}
+    if mode == "open":
+        options.update(multiple=GLib.Variant("b", True), directory=GLib.Variant("b", False))
+    else:
+        name = request.get("name") or "Attachment"
+        if not isinstance(name, str) or "/" in name or "\0" in name or name in (".", ".."):
+            raise ValueError("Invalid attachment filename.")
+        options["current_name"] = GLib.Variant("s", name)
+    if request.get("folder"):
+        options["current_folder"] = GLib.Variant("ay", os.fsencode(local_path(request["folder"])) + b"\0")
+    return options
+
+
+def pick(request, Gio, GLib, GLibUnix):
+    mode = request.get("mode", "open")
+    options = portal_options(request, "intercom_" + secrets.token_hex(12), GLib)
+    title = "Intercom — Save attachment" if mode == "save" else "Intercom — Attach files"
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    loop = GLib.MainLoop()
+    handle = ""
+    finished = False
+    result = {"state": "cancelled"}
+
+    def cancel(*args):
+        loop.quit()
+        return False
+
+    def response(connection, sender, path, interface, name, parameters):
+        nonlocal result, finished
+        if path != handle:
+            return
+        finished = True
+        code, values = parameters.unpack()
+        try:
+            result = selection(code, values, mode)
+        except ValueError as error:
+            result = {"state": "error", "message": str(error)}
+        loop.quit()
+
+    def disconnected(*args):
+        nonlocal result
+        result = {"state": "error", "message": "The desktop portal disconnected. Try again."}
+        loop.quit()
+
+    def owner_changed(connection, sender, path, interface, name, parameters):
+        if not parameters.unpack()[2]:
+            disconnected()
+
+    # Subscribe before calling: fast responses must not race the method reply.
+    subscription = bus.signal_subscribe(PORTAL, REQUEST, "Response", None, None, Gio.DBusSignalFlags.NONE, response)
+    owner_subscription = bus.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                                              "/org/freedesktop/DBus", PORTAL, Gio.DBusSignalFlags.NONE, owner_changed)
+    closed = bus.connect("closed", disconnected)
+    sources = [GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)]
+    # If Quickshell dies or destroys the component, don't leave an orphan picker.
+    sources.append(GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT,
+                                    GLib.IOCondition.HUP | GLib.IOCondition.ERR, cancel))
+    try:
+        reply = bus.call_sync(PORTAL, DESKTOP, "org.freedesktop.portal.FileChooser",
+                              "SaveFile" if mode == "save" else "OpenFile",
+                              GLib.Variant("(ssa{sv})", ("", title, options)),
+                              GLib.VariantType.new("(o)"), Gio.DBusCallFlags.NONE, 15000, None)
+        handle = reply.unpack()[0]
+        loop.run()
+        return result
+    finally:
+        if handle and not finished:
+            try:
+                bus.call_sync(PORTAL, handle, REQUEST, "Close", None, None, Gio.DBusCallFlags.NONE, 3000, None)
+            except GLib.Error:
+                pass
+        bus.signal_unsubscribe(subscription)
+        bus.signal_unsubscribe(owner_subscription)
+        bus.disconnect(closed)
+        for source in sources:
+            if GLib.MainContext.default().find_source_by_id(source):
+                GLib.source_remove(source)
+
+
+def main():
+    try:
+        from gi.repository import Gio, GLib, GLibUnix
+    except ImportError:
+        result = {"state": "error", "message": "The system file picker needs python-gobject and xdg-desktop-portal."}
+    else:
+        try:
+            request = json.loads(sys.stdin.readline())
+            if not isinstance(request, dict):
+                raise ValueError("Invalid file picker request.")
+            result = pick(request, Gio, GLib, GLibUnix)
+        except (ValueError, GLib.Error, OSError):
+            result = {"state": "error", "message": "Could not open the system file picker. Check that your desktop portal is running. Your draft has been kept."}
+    print(json.dumps(result), flush=True)
+
+
+if __name__ == "__main__":
+    main()

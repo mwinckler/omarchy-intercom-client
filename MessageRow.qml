@@ -22,10 +22,12 @@ BorderSurface {
   property string timeLabel: ""
   property bool pointerHovered: hoverHandler.hovered
   property bool imagesEnabled: false
+  property bool downloadingAttachment: false
   property Flickable imageViewport: null
 
   signal activated()
   signal linkActivated(string url)
+  signal downloadRequested(var attachment)
 
   readonly property color dim: Qt.darker(foreground, 1.5)
   readonly property color draftColor: "#a78bfa"
@@ -110,7 +112,7 @@ BorderSurface {
     onTapped: function(point) {
       for (var i = 0; i < blockRepeater.count; i++) {
         var item = blockRepeater.itemAt(i) as Loader
-        if (!item || !(item.item instanceof MessageImage)) continue
+        if (!item || item.item instanceof Text) continue
         var p = root.mapToItem(item, point.position.x, point.position.y)
         if (p.x >= 0 && p.y >= 0 && p.x < item.width && p.y < item.height) return
       }
@@ -197,13 +199,15 @@ BorderSurface {
           required property int index
           Layout.fillWidth: true
           Layout.topMargin: index > 0 ? Style.space(12) : 0
-          sourceComponent: modelData.type === "image" ? imageComponent : textComponent
+          sourceComponent: modelData.type === "image" ? imageComponent
+            : modelData.type === "attachment" ? attachmentComponent : textComponent
 
           Component {
             id: imageComponent
             MessageImage {
               image: blockLoader.modelData
               imagesEnabled: root.imagesEnabled
+              downloadingAttachment: root.downloadingAttachment
               viewport: root.imageViewport
               messageRow: root
               messageTop: root.y
@@ -211,6 +215,45 @@ BorderSurface {
               accent: root.accent
               fontFamily: root.fontFamily
               onLinkActivated: function(url) { root.linkActivated(url) }
+              onDownloadRequested: root.downloadRequested(blockLoader.modelData)
+            }
+          }
+
+          Component {
+            id: attachmentComponent
+            RowLayout {
+              spacing: Style.space(8)
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(2)
+                Text {
+                  Layout.fillWidth: true
+                  text: String(blockLoader.modelData.name || "Attachment")
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: root.themeFont.bodySmall
+                  wrapMode: Text.WrapAnywhere
+                }
+                Text {
+                  Layout.fillWidth: true
+                  text: [String(blockLoader.modelData.contentType || ""), Model.attachmentSize(blockLoader.modelData.size)].filter(function(part) { return part !== "" }).join(" · ")
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: root.themeFont.caption
+                  wrapMode: Text.WrapAnywhere
+                }
+              }
+              Button {
+                text: "Download"
+                enabled: !root.downloadingAttachment
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                fontSize: root.themeFont.caption
+                onClicked: root.downloadRequested(blockLoader.modelData)
+              }
             }
           }
 

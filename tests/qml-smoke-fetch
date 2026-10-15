@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Deterministic subprocess responses for the QML smoke test; never use the API."""
+
+import json
+import sys
+
+args = sys.argv[1:]
+conversation = {}
+if "--conversation" in args:
+    conversation = {
+        "id": args[args.index("--conversation") + 1],
+        "state": "open",
+        "messages": [],
+    }
+
+print(json.dumps({
+    "state": "ready",
+    "workspaceId": "smoke",
+    "waitingCount": 0,
+    "openCount": 0,
+    "conversations": [],
+    "conversation": conversation,
+}))

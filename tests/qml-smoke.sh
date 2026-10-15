@@ -7,7 +7,14 @@ smoke_root=$(mktemp -d)
 trap 'rm -rf -- "$smoke_root"' EXIT
 
 cp -- "$repo_root/tests/qml-smoke.qml" "$smoke_root/shell.qml"
-ln -s -- "$repo_root" "$smoke_root/plugin"
+mkdir -- "$smoke_root/plugin"
+for source in "$repo_root"/*.qml "$repo_root"/*.js "$repo_root/manifest.json" "$repo_root/LICENSE"; do
+  ln -s -- "$source" "$smoke_root/plugin/"
+done
+# Exercise the real QML and its dialog configuration without live API calls or
+# late unconfigured responses closing a composer during the timed dialog tests.
+install -m755 -- "$repo_root/tests/qml-smoke-fetch" "$smoke_root/plugin/intercom-fetch"
+install -m644 -- "$repo_root/tests/qml-smoke-picker" "$smoke_root/plugin/intercom-file-picker"
 ln -s -- /usr/share/omarchy/shell/Commons "$smoke_root/Commons"
 ln -s -- /usr/share/omarchy/shell/Ui "$smoke_root/Ui"
 

@@ -278,6 +278,14 @@ function normalizeMessageBlocks(value) {
         height: Math.max(0, Math.min(32768, Math.floor(numberValue(block.height, 0)))),
         linkUrl: safeImageUrl(block.linkUrl) || url
       })
+    } else if (block.type === "attachment") {
+      var attachmentUrl = safeImageUrl(block.url)
+      if (attachmentUrl === "") continue
+      blocks.push({
+        type: "attachment", url: attachmentUrl,
+        name: textValue(block.name, "Attachment"), contentType: textValue(block.contentType),
+        size: Math.max(0, Math.floor(numberValue(block.size, 0)))
+      })
     }
   }
   return blocks
@@ -289,13 +297,65 @@ function messageBlocks(value) {
   if (blocks.length === 0) blocks = [{ type: "text", text: textValue(msg.body).replace(/<img\b[^>]*>/gi, "") }]
   var out = []
   for (var i = 0; i < blocks.length; i++) {
-    if (blocks[i].type === "image") out.push(blocks[i])
+    if (blocks[i].type !== "text") out.push(blocks[i])
     else {
       var paragraphs = messageParagraphs(blocks[i].text)
       for (var j = 0; j < paragraphs.length; j++) out.push({ type: "text", text: paragraphs[j] })
     }
   }
   return out
+}
+
+function attachmentName(value) {
+  var path = textValue(value)
+  return path.slice(path.lastIndexOf("/") + 1) || "Attachment"
+}
+
+function downloadAttachmentName(value) {
+  var row = objectValue(value)
+  var name = textValue(row.name)
+  if (name === "") {
+    name = textValue(row.url).split(/[?#]/)[0]
+    try { name = decodeURIComponent(name) } catch (error) { /* Use the encoded name. */ }
+  }
+  name = attachmentName(name).replace(/[\x00-\x1f\x7f\\]/g, "_")
+  return name === "." || name === ".." ? "Attachment" : name
+}
+
+function attachmentSize(value) {
+  var size = Math.max(0, numberValue(value, 0))
+  if (size === 0) return ""
+  if (size < 1024) return Math.floor(size) + " B"
+  if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KiB"
+  return (size / (1024 * 1024)).toFixed(1) + " MiB"
+}
+
+function localAttachments(value) {
+  var source = arrayValue(value)
+  var paths = []
+  for (var i = 0; i < source.length; i++) {
+    var path = textValue(source[i])
+    if (path.indexOf("file://") === 0) {
+      if (path.indexOf("file:///") !== 0) continue
+      try { path = decodeURIComponent(path.slice(7)) } catch (error) { continue }
+    }
+    if (path.charAt(0) !== "/" || path.indexOf("\x00") >= 0 || paths.indexOf(path) >= 0) continue
+    paths.push(path)
+  }
+  return paths
+}
+
+function hasDraft(drafts, conversationId) {
+  var entry = draftEntry(drafts, conversationId)
+  return entry.body.trim() !== "" || localAttachments(entry.attachments).length > 0
+}
+
+function composerPreview(body, attachments) {
+  var text = markdownToStyled(body)
+  var names = localAttachments(attachments).map(function(path) {
+    return escapeStyled(attachmentName(path))
+  })
+  return text + (names.length ? (text ? "<br><br>" : "") + "Attachments: " + names.join(", ") : "")
 }
 
 function isWordChar(value) {
@@ -823,7 +883,7 @@ function conversationHaystack(value) {
     var blocks = arrayValue(msg.blocks)
     for (var b = 0; b < blocks.length; b++) {
       var block = objectValue(blocks[b])
-      if (block.type === "image") parts.push(block.name, block.alt)
+      if (block.type === "image" || block.type === "attachment") parts.push(block.name, block.alt)
     }
   }
   return parts.join("\n").toLowerCase()
@@ -1127,7 +1187,7 @@ function normalizeDrafts(value) {
     if (!Object.prototype.hasOwnProperty.call(source, key)) continue
     if (!isSafeConversationId(key)) continue
     var entry = normalizeDraftEntry(source[key])
-    if (entry.body.trim() === "") continue
+    if (entry.body.trim() === "" && !localAttachments(entry.attachments).length) continue
     next[key] = entry
   }
   return next
@@ -1138,7 +1198,10 @@ function normalizeDraftEntry(value) {
     return { body: textValue(value), note: false }
   }
   var row = objectValue(value)
-  return { body: textValue(row.body), note: row.note === true }
+  var entry = { body: textValue(row.body), note: row.note === true }
+  var attachments = localAttachments(row.attachments)
+  if (attachments.length) entry.attachments = attachments
+  return entry
 }
 
 function draftEntry(drafts, conversationId) {
@@ -1147,7 +1210,7 @@ function draftEntry(drafts, conversationId) {
   var value = objectValue(drafts)[id]
   if (value === undefined || value === null) return { body: "", note: false }
   var entry = normalizeDraftEntry(value)
-  if (entry.body.trim() === "") return { body: "", note: false }
+  if (entry.body.trim() === "" && !localAttachments(entry.attachments).length) return { body: "", note: false }
   return entry
 }
 
@@ -1159,12 +1222,13 @@ function draftIsNote(drafts, conversationId) {
   return draftEntry(drafts, conversationId).note
 }
 
-function setDraft(drafts, conversationId, text, note) {
+function setDraft(drafts, conversationId, text, note, attachments) {
   var next = normalizeDrafts(drafts)
   if (!isSafeConversationId(conversationId)) return next
   var body = textValue(text)
-  if (body.trim() === "") delete next[conversationId]
-  else next[conversationId] = { body: body, note: note === true }
+  var files = localAttachments(attachments)
+  if (body.trim() === "" && !files.length) delete next[conversationId]
+  else next[conversationId] = normalizeDraftEntry({ body: body, note: note === true, attachments: files })
   return next
 }
 
@@ -1290,7 +1354,7 @@ function normalizeLocalReadState(value) {
 function localMessageKey(value) {
   var msg = normalizeMessage(value)
   var identity = [msg.createdAt, msg.kind, msg.from, msg.body]
-  var images = arrayValue(msg.blocks).filter(function(block) { return block.type === "image" })
+  var images = arrayValue(msg.blocks).filter(function(block) { return block.type === "image" || block.type === "attachment" })
   if (images.length > 0) identity.push(images.map(function(block) {
     return [imageIdentity(block.url), block.name]
   }))
@@ -2029,16 +2093,19 @@ function normalizeScheduledEntry(value) {
   var id = textValue(row.id)
   var conversation = textValue(row.conversationId)
   var body = textValue(row.body)
+  var attachments = localAttachments(row.attachments)
   var sendAt = Math.floor(numberValue(row.sendAt, 0))
-  if (id === "" || !isSafeConversationId(conversation) || body.trim() === "" || sendAt <= 0)
+  if (id === "" || !isSafeConversationId(conversation) || (body.trim() === "" && !attachments.length) || sendAt <= 0)
     return null
-  return {
+  var entry = {
     id: id,
     conversationId: conversation,
     body: body,
     note: row.note === true,
     sendAt: sendAt
   }
+  if (attachments.length) entry.attachments = attachments
+  return entry
 }
 
 function normalizeScheduled(value) {
@@ -2087,18 +2154,20 @@ function scheduledId(nowMs, existing) {
   return id
 }
 
-function addScheduled(list, conversationId, body, note, sendAt, nowMs) {
+function addScheduled(list, conversationId, body, note, sendAt, nowMs, attachments) {
   var rows = normalizeScheduled(list)
   var conversation = textValue(conversationId)
   var text = textValue(body)
   var at = Math.floor(numberValue(sendAt, 0))
-  if (!isSafeConversationId(conversation) || text.trim() === "" || at <= 0) return rows
+  var files = localAttachments(attachments)
+  if (!isSafeConversationId(conversation) || (text.trim() === "" && !files.length) || at <= 0) return rows
   rows.push({
     id: scheduledId(nowMs, rows),
     conversationId: conversation,
     body: text,
     note: note === true,
-    sendAt: at
+    sendAt: at,
+    attachments: files
   })
   return normalizeScheduled(rows)
 }

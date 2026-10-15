@@ -12,6 +12,7 @@ ColumnLayout {
 
   property var image: ({})
   property bool imagesEnabled: false
+  property bool downloadingAttachment: false
   property Flickable viewport: null
   property Item messageRow: null
   property real messageTop: 0
@@ -41,6 +42,7 @@ ColumnLayout {
   }
 
   signal linkActivated(string url)
+  signal downloadRequested()
 
   function load() { consent = true }
   function queueLoad() {
@@ -115,6 +117,15 @@ ColumnLayout {
       font.family: root.fontFamily
       font.pixelSize: root.themeFont.caption
       elide: Text.ElideRight
+    }
+    Button {
+      text: "Download"
+      enabled: !root.downloadingAttachment
+      foreground: root.foreground
+      accent: root.accent
+      fontFamily: root.fontFamily
+      fontSize: root.themeFont.caption
+      onClicked: root.downloadRequested()
     }
     Button {
       text: "Open original"

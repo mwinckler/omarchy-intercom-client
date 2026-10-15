@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import json
+import base64
+import io
 import os
 import tempfile
+import threading
 import unittest
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +19,144 @@ loader.exec_module(FETCH)
 
 
 class FetchTests(unittest.TestCase):
+    def test_document_attachments_are_retained_searchable_and_deduplicated(self):
+        attachment = {"url": "https://example.com/Invoice.PDF?signature=old", "content_type": "application/pdf", "filesize": 1234}
+        body, blocks = FETCH.format_message_content("", [attachment, attachment, None, {"url": "file:///etc/passwd"}])
+        self.assertEqual(body, "Attachment: Invoice.PDF")
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0], {"type": "attachment", "url": attachment["url"], "name": "Invoice.PDF", "contentType": "application/pdf", "size": 1234})
+        conv = {"id": "docs", "source": {"attachments": [attachment]}, "conversation_parts": {"conversation_parts": [
+            {"part_type": "comment", "attachments": [attachment], "created_at": 2},
+            {"part_type": "note", "body": "See file", "attachments": [{**attachment, "filesize": "bad"}], "created_at": 3},
+        ]}}
+        messages = FETCH.extract_messages(conv)
+        self.assertEqual(len(messages), 3)
+        self.assertEqual(messages[-1]["blocks"][-1]["size"], 0)
+        self.assertIn("invoice.pdf", FETCH.archive_row_haystack({"id": "docs", "messages": messages}).lower())
+        old_id = messages[1]["id"]
+        conv["conversation_parts"]["conversation_parts"][0]["attachments"] = [{**attachment, "url": attachment["url"].replace("old", "new")}]
+        self.assertEqual(FETCH.extract_messages(conv)[1]["id"], old_id)
+
+    def test_upload_files_encode_binary_with_names_and_mime_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory, "screen shot.png")
+            image.write_bytes(b"\x00\xffbinary")
+            unknown = Path(directory, "unknown.not-a-file-type")
+            unknown.write_bytes(b"")
+            files = FETCH.reply_attachment_files(json.dumps({"attachments": [image.as_uri(), str(unknown)]}))
+        self.assertEqual(files[0], {"name": "screen shot.png", "content_type": "image/png", "data": base64.b64encode(b"\x00\xffbinary").decode("ascii")})
+        self.assertEqual(files[1]["content_type"], "application/octet-stream")
+        self.assertEqual(files[1]["data"], "")
+
+    def test_invalid_uploads_fail_without_network_or_partial_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory, "pipe")
+            os.mkfifo(fifo)
+            file = Path(directory, "large.txt")
+            file.write_bytes(b"12345")
+            invalid = [None, "bad", [str(file)] * 11, ["https://example.com/file"], ["file://remote/etc/passwd"],
+                       ["relative.txt"], ["/missing/attachment"], [str(fifo)], [directory], ["/bad\x00name"]]
+            with patch.object(FETCH, "read_token", return_value="tok"), patch.object(FETCH, "request_json") as request:
+                for attachments in invalid:
+                    with self.subTest(attachments=attachments):
+                        result = FETCH.reply_conversation(None, "123", json.dumps({"body": "Do not send without the file", "attachments": attachments}))
+                        self.assertEqual(result["state"], "error")
+                with patch.object(FETCH, "MAX_UPLOAD_BYTES", 4):
+                    result = FETCH.reply_conversation(None, "123", json.dumps({"body": "Hi", "attachments": [str(file)]}))
+                    self.assertIn("20 MiB", result["message"])
+                request.assert_not_called()
+
+    def test_attachment_only_replies_and_notes_post_as_signed_in_admin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory, "log.txt")
+            file.write_text("log contents")
+            for note in (False, True):
+                posted = []
+                def request(url, token, method="GET", payload=None, **kwargs):
+                    if url.endswith("/me"):
+                        return {"id": "signed-in", "app": {"region": "US"}}
+                    if method == "POST":
+                        posted.append(payload)
+                    return {"id": "123"}
+                with patch.object(FETCH, "read_token", return_value="tok"), patch.object(FETCH, "request_json", side_effect=request):
+                    result = FETCH.reply_conversation(None, "123", json.dumps({"body": "", "note": note, "attachments": [str(file)]}))
+                self.assertEqual(result["state"], "ready")
+                self.assertEqual(len(posted), 1)
+                self.assertEqual(posted[0]["admin_id"], "signed-in")
+                self.assertEqual(posted[0]["message_type"], "note" if note else "comment")
+                self.assertEqual(base64.b64decode(posted[0]["attachment_files"][0]["data"]), b"log contents")
+                self.assertIn("body", posted[0])
+
+    def test_attachment_reply_still_checks_for_new_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory, "file.txt")
+            file.write_text("attachment")
+            thread = {"id": "123", "source": {"id": "new", "created_at": 2, "body": "New comment"}}
+            with patch.object(FETCH, "read_token", return_value="tok"), patch.object(FETCH, "request_json", return_value={"id": "admin"}) as request, patch.object(FETCH, "fetch_conversation", return_value=thread):
+                result = FETCH.reply_conversation(None, "123", json.dumps({"body": "Reply", "attachments": [str(file)], "seen": [{"id": "old", "createdAt": 1}]}))
+            self.assertEqual(result["state"], "error")
+            self.assertIn("New comments", result["message"])
+            self.assertTrue(all(call.kwargs.get("method", "GET") != "POST" for call in request.call_args_list))
+
+    def test_download_redirects_without_auth_and_saves_binary(self):
+        headers = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                headers.append(self.headers)
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/file?signature=secret")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "5")
+                    self.end_headers()
+                    self.wfile.write(b"\x00\xffabc")
+            def log_message(self, *args):
+                pass
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"INTERCOM_ACCESS_TOKEN": "never-send-this"}):
+                target = Path(directory, "saved file.bin")
+                result = FETCH.download_attachment(json.dumps({"url": f"http://127.0.0.1:{server.server_port}/redirect", "path": target.as_uri()}))
+                self.assertEqual(result["state"], "saved")
+                self.assertEqual(target.read_bytes(), b"\x00\xffabc")
+                self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn("signature", result["message"])
+            self.assertEqual(len(headers), 2)
+            self.assertTrue(all(header.get("Authorization") is None for header in headers))
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+    def test_failed_download_preserves_existing_file_and_removes_partial(self):
+        class Response(io.BytesIO):
+            headers = {"Content-Length": "9"}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "existing.bin")
+            target.write_bytes(b"keep me")
+            raw = json.dumps({"url": "https://example.com/file?signature=secret", "path": str(target)})
+            with patch.object(FETCH.urllib.request.OpenerDirector, "open", return_value=Response(b"short")):
+                result = FETCH.download_attachment(raw)
+            self.assertEqual(result["state"], "error")
+            self.assertEqual(target.read_bytes(), b"keep me")
+            self.assertEqual(list(Path(directory).iterdir()), [target])
+            with patch.object(FETCH, "MAX_DOWNLOAD_BYTES", 4), patch.object(FETCH.urllib.request.OpenerDirector, "open", return_value=Response(b"short")):
+                self.assertEqual(FETCH.download_attachment(raw)["state"], "error")
+            self.assertEqual(target.read_bytes(), b"keep me")
+
+    def test_download_rejects_unsafe_urls_and_destinations(self):
+        with patch.object(FETCH.urllib.request.OpenerDirector, "open") as request:
+            for url in ("file:///etc/passwd", "data:text/plain,hi", "https://u:p@example.com/a", "https://example.com:bad/a"):
+                self.assertEqual(FETCH.download_attachment(json.dumps({"url": url, "path": "/tmp/unused"}))["state"], "error")
+            self.assertEqual(FETCH.download_attachment(json.dumps({"url": "https://example.com/a", "path": "relative"}))["state"], "error")
+            request.assert_not_called()
+        with self.assertRaises(ValueError):
+            FETCH.AttachmentRedirectHandler().redirect_request(None, None, 302, "", {}, "file:///etc/passwd")
+
     def test_collect_search_pages_has_no_total_limit(self):
         first = {
             "total_count": 201,
@@ -221,7 +363,7 @@ class FetchTests(unittest.TestCase):
             attachment, attachment, {"url": "https://example.com/file.pdf", "content_type": "application/pdf"},
             {"url": "file:///etc/passwd", "content_type": "image/png"}, None,
         ])
-        self.assertEqual(len(blocks), 1)
+        self.assertEqual([block["type"] for block in blocks], ["image", "attachment"])
         self.assertEqual(blocks[0]["name"], "screenshot.png")
         self.assertEqual(blocks[0]["width"], 500)
         _, repeated = FETCH.format_message_content(f'<img src="{url}"><img src="{url}">', [attachment])
