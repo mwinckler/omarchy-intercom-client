@@ -1,28 +1,51 @@
 # Intercom notifier
 
-An Omarchy bar widget that lets you manage messages in your Intercom helpdesk
-without needing to interact with Intercom's own web interface.
+> [!IMPORTANT]
+> NOTE FROM A HUMAN: The following is a lightly-edited clanker-generated README.
+> On top of that, this whole project is vibe-coded. Treat it accordingly.
 
-The plugin includes the following features:
+An [Omarchy](https://omarchy.org/) shell bar widget for reading and answering
+Intercom conversations without keeping the Intercom web app open.
 
-- Status bar icon indicating how many conversations are waiting for a reply (any conversation where the last reply was not a team member), how many total conversations are open, and whether there new messages you haven't seen yet
-- A pane showing a list of conversations matching the current filter (Open, Waiting (for reply), Closed, Snoozed, or All) and the ability to navigate through conversations and view all messages in them
-- An inline editor to reply to a conversation (or add a private note) using Markdown
-- Download message attachments and attach local files to replies or notes
-- The ability to schedule replies for a future date instead of sending right away (handy for answering customer support in the middle of the night while not wanting to give customers the impression that you're available at all hours)
+- Bar counts in **waiting/open** format, with flashing for locally unread messages
+- A two-pane reader with Open, Waiting, Closed, Snoozed, and All filters
+- Public replies and private notes as the signed-in teammate, with Markdown previews
+- Local drafts, scheduled sends, file uploads, attachment downloads, and image previews
+- Local cache/archive search, optional Intercom API search, and desktop notifications
+- Close and reopen conversations, or open them in your browser
 
+**Waiting** means an open, non-snoozed conversation with a positive Intercom
+`waiting_since` value. It is not calculated by checking the last message's author.
+The counts cover conversations accessible to your token, not just those assigned
+to you.
+
+## Requirements
+
+- Omarchy with its Quickshell-based shell and `omarchy plugin` commands. This is
+  a shell plugin, not a standalone app or Waybar module.
+- Python 3. The API helper uses only the Python standard library.
+- For attachment pickers: the system Python's `python-gobject`,
+  `xdg-desktop-portal`, and a FileChooser backend (normally GTK on Omarchy).
+- An Intercom workspace and an OAuth app with the permissions below.
 
 ## Install
 
 ```bash
-omarchy plugin add <git-url> --enable
+omarchy plugin add https://github.com/mwinckler/omarchy-intercom-client.git --enable
 ```
 
-Or copy this folder to `~/.config/omarchy/plugins/intercom-notifier` and enable
+Or copy this folder to `~/.config/omarchy/plugins/omarchy-intercom-client` and enable
 it:
 
 ```bash
-omarchy plugin enable intercom-notifier --section right
+omarchy plugin enable omarchy-intercom-client --section right
+```
+
+The plugin ID is `omarchy-intercom-client`, regardless of this repository's name.
+For a git-managed installation, update with:
+
+```bash
+omarchy plugin update omarchy-intercom-client
 ```
 
 ## Sign in
@@ -40,89 +63,167 @@ On the app's Authentication page:
    Read admins is required for the profile indicator and to reply as yourself.
 4. Copy the Client ID and Client secret.
 
-Do not put those values in `shell.json`. Paste them on the plugin's settings page
-(gear icon or `s`) and click **Sign in with Intercom**. The browser asks you to
-authorize; the plugin stores your personal OAuth token at
-`~/.config/omarchy/intercom-notifier/token` (`0700` directory, `0600` file) and
-the app credentials at `~/.config/omarchy/intercom-notifier/oauth.json`. Replies
-always use `GET /me` for that token, so they appear as you. While signed in, the
+Do not put those values in `shell.json`. Open the widget, paste them on its
+settings page (gear icon or `s`), and click **Sign in with Intercom**. The browser
+asks you to authorize; by default, the plugin stores your personal OAuth token at
+`~/.config/omarchy/omarchy-intercom-client/token` (`0700` directory, `0600` file) and
+the app credentials at `~/.config/omarchy/omarchy-intercom-client/oauth.json` (`0600`).
+Replies always use `GET /me` for that token, so they appear as you. While signed in, the
 panel shows your teammate name and email in the top right, with a **Sign out**
 link that removes the saved token and leaves the app credentials in place so you
-can sign in again. If the profile says **No teammate profile**, the token is
-missing **Read admins** — grant that on the app, then **Sign in again**.
+can sign in again. If the profile says **No teammate profile**, check that the
+app has **Read admins**, then **Sign in again**.
 
-Intercom OAuth tokens do not expire on a timer and do not include a refresh
-token. If you revoke the app, the plugin asks you to sign in again.
+Leave Client ID and secret blank on subsequent sign-ins to reuse the saved app
+credentials. If you revoke the app, the plugin asks you to sign in again. Browser
+sign-in needs local port `18741` to be available and times out after 150 seconds.
 
 Conversation links need your **workspace ID**. The plugin infers it from waiting
 conversations when Intercom includes a company on the thread, and from `GET /me`.
-It caches that in `~/.config/omarchy/intercom-notifier/config.json`. If links
-still fail, paste any inbox URL (the segment after `/a/inbox/`).
+It caches that in `~/.config/omarchy/omarchy-intercom-client/config.json`. If links
+still fail, paste your workspace ID or a full inbox URL into settings and click
+**Save token or workspace**. The workspace ID is the segment after `/a/inbox/`.
+
+### Advanced token setup
+
+If browser sign-in cannot complete, settings also accepts an existing OAuth
+access token. **Access token file** changes where tokens are read and saved.
 
 A `token` file next to the plugin (for example
-`~/.config/omarchy/plugins/intercom-notifier/token`) is also accepted.
+`~/.config/omarchy/plugins/omarchy-intercom-client/token`) is also accepted.
 
 Resolution order:
 
 1. `INTERCOM_ACCESS_TOKEN` environment variable
 2. Widget setting **Access token file**
-3. `~/.config/omarchy/intercom-notifier/token`
+3. `~/.config/omarchy/omarchy-intercom-client/token`
 4. `token` in the plugin directory
 
-US, EU, and AU API hosts are tried automatically. The region that succeeds is cached in `~/.config/omarchy/intercom-notifier/config.json`.
+US, EU, and AU API hosts are tried automatically. The region that succeeds is
+cached in `~/.config/omarchy/omarchy-intercom-client/config.json`.
+
+### Widget settings
+
+These Omarchy widget settings are separate from the in-panel sign-in page:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `tokenFile` | Empty | Optional access-token path; falls back to the locations above |
+| `refreshIntervalSec` | `60` | Background polling interval in seconds, clamped to `15`–`3600` |
 
 ## Controls
 
-- Left click: open or close the panel
-- Right click: refresh now
-- Middle click: open the Intercom inbox home
-- Expanded reader: `j`/`k` move the conversation list (or scroll the thread when that
-  pane is focused), `h`/`l` switch panes, `f` then `o`/`w`/`c`/`s`/`a` to filter open,
-  waiting, closed, snoozed, or all conversations, `e` to enlarge the panel, `s` for
-  settings, Enter to reply, `o` to open in the browser, `c` to close or reopen the
-  selected conversation, `/` to search, `r` refresh, Esc close
-- Large reader: the same expanded controls; `e` returns to the smaller expanded size
-- Search (`/`): types against cached conversations first (inbox, thread cache, and the
-  local archive). **Ctrl+I** (or `i` after leaving the search box) toggles **Intercom**
-  API search vs local cache. Down or Tab leaves the search box so you can move through
-  results with `j`/`k` or arrows; Up on the first result (or `/`) returns to the search
-  box. Enter opens the selected result; Esc closes search.
-- Composer: Enter inserts a newline, Ctrl+Enter sends Markdown (`**bold**`,
-  `*italic*`, `[text](url)`). The rendered preview sits above the input as the
-  next teammate message. Esc saves a local draft for that conversation; **Discard**
-  (or Ctrl+Shift+D) throws it away. Ctrl+N toggles sending as an internal **Note** instead of
-  a public reply. Ctrl+W deletes the previous word; Ctrl+U deletes
-  from the start of the line to the cursor. Enter on a conversation with a **DRAFT** badge reopens it for
-  editing. Replies are sent as the signed-in teammate.
-  Drafts are stored at `~/.config/omarchy/intercom-notifier/drafts.json`.
-- Settings: paste the shared app Client ID and secret, then Sign in with Intercom.
-  Optional workspace ID for conversation links. Gear icon or `s` opens it; Esc or Back
-  returns to the inbox. First-time setup and signed-out errors open this page
-  automatically. When signed in, the top-right profile shows who you are and a
-  Sign out link. **Sync all conversations** downloads every thread, including
-  closed ones, into `~/.config/omarchy/intercom-notifier/archive/` for later
-  search. Closed threads are stored once and are not watched for new replies.
-- The panel reopens in whichever size you last used (`e` cycles expanded and large),
-  on the last conversation you had selected. It reopens that thread even if it is not
-  in the current inbox filter. The inbox also remembers the last filter: open, waiting
-  for a reply, closed, snoozed, or all.
-- A desktop notification appears when a customer message puts a thread into waiting
-  (or sends a follow-up on one that is already waiting). The toast shows the sender
-  and a preview; clicking it opens this widget expanded on that conversation.
-- The bar icon flashes while any fetched messages in Open conversations remain
-  unread locally and stops when none remain. Unread message cards have a dot in their upper-left corner.
-  Highlighting a conversation in the list (by keyboard or click) marks all its
-  messages read, without needing to focus the right-hand pane. Messages loaded
-  while that conversation remains highlighted in the focused panel are also read. Read
-  status survives restarts in `~/.config/omarchy/intercom-notifier/cache.json` and
-  is independent of Intercom's read status. Background fetching does not mark Open
-  conversations read. All other statuses (including Closed and Snoozed) are always
-  treated as read and never make the icon flash. Your own replies and notes are excluded.
-- Conversation rows also show an unread dot. Unread conversations missing from
-  the latest inbox page remain at the top of their matching filter, so older
-  unread messages cannot leave the tray flashing without a way to reach them.
-- Inbox filters fetch every API page: all open conversations appear in Open,
-  regardless of age or count. The API's 150-row page size is not a display limit.
+| Action | Control |
+| --- | --- |
+| Open/close the panel | Left click the bar widget |
+| Refresh now | Right click the widget, or `r` in the reader |
+| Open the Intercom inbox home | Middle click the widget |
+| Move through conversations | `j` / `k` or Down / Up in the list pane |
+| Switch panes | `h` / `l` or Left / Right |
+| Move through messages, drafts, and scheduled sends | `j` / `k` in the thread pane |
+| Filter conversations | `f`, then `o` (open), `w` (waiting), `c` (closed), `s` (snoozed), or `a` (all) |
+| Toggle expanded/large size | `e` |
+| Open settings | Gear icon or `s` |
+| Reply or resume a draft | Enter on a conversation |
+| Activate the selected thread item | Enter (edit a draft/scheduled send, activate its action, or start a reply) |
+| Open the selected conversation in a browser | `o` |
+| Close the selected conversation, or reopen it if closed | `c` |
+| Search | `/` |
+| Back/close | Esc (backs out of the current view or closes the panel; saves a draft when leaving the composer) |
+
+The panel remembers its size, filter, and last selected conversation, even if
+that thread is outside the current filter. Toggling an already open panel after
+switching workspace or monitor restores its keyboard focus instead of closing it.
+Settings opens automatically when setup is missing, the main refresh fails, or the
+workspace ID cannot be inferred.
+
+Inbox filters fetch every API page; the 150-row API page size is not a display
+limit. Snoozed is a view filter; the plugin can close/reopen conversations but
+does not offer a snooze action.
+
+### Replies and drafts
+
+The composer shows a rendered preview above the input. Its Markdown subset
+supports bold, italic, HTTP(S) links, inline code, fenced code blocks, and line
+breaks; it is not a full Markdown renderer.
+
+| Action | Control |
+| --- | --- |
+| Insert a newline | Enter |
+| Send immediately | **Send now** or Ctrl+Enter |
+| Schedule a send | **Send later...** or Ctrl+S |
+| Toggle public reply/private note | **REPLY** / **NOTE** or Ctrl+N |
+| Attach local files | **Attach…** or Ctrl+O |
+| Save a draft and leave the composer | Esc |
+| Discard the draft | **Discard** or Ctrl+Shift+D |
+| Delete the previous word | Ctrl+W |
+| Delete from the start of the line to the cursor | Ctrl+U |
+
+Closing the panel or switching conversations also saves the current draft.
+Enter on a conversation with a **DRAFT** badge resumes it, including its note
+mode and selected attachments. Replies and notes use the teammate returned by
+`GET /me` for the active token.
+
+Before sending, the helper reloads the conversation. If comments have arrived
+since the loaded thread snapshot, it refuses the send with **New comments
+arrived; reply was not sent.** Review the updated thread before retrying; your
+composer contents are retained.
+
+### Scheduled sends
+
+Write a reply or note, then choose **Send later...** or Ctrl+S. Type a time such
+as `tomorrow at 9am`, `in 2 hours`, or `2027-01-15 09:00`, or switch to the
+calendar/time picker. Times use your machine's local timezone; ambiguous numeric
+dates follow its locale. Review the resolved date/time and confirm the send.
+
+Queued messages appear as **LATER** cards in the thread. Select a card and press
+Enter to edit it: this removes the old schedule and returns the message to the
+composer. Send or schedule it again; Esc saves it as a draft, not a scheduled
+send. **Cancel scheduled** asks for confirmation before removing a queued send.
+
+**Scheduling is local, not hosted by Intercom.** Due sends are checked when the
+plugin loads its queue and on each refresh (every 60 seconds by default), so
+delivery is not exact to the second. The computer must be awake, with the plugin
+running, a valid token, and a working connection. The panel can be closed.
+Overdue messages are attempted when the plugin runs again; failed sends remain
+queued for a later attempt. The queue is stored in `scheduled.json`.
+
+### Search and archive
+
+`/` opens local search across fetched inboxes, cached threads, and the local
+archive. Search includes message text, names/email addresses, and image/file
+names. Ctrl+I in the search box (or `i` outside it) toggles **Intercom** API search.
+Remote search queries the source author's name/email, subject, and source body;
+it is not a full-text search of every reply. Both modes show at most 50 results.
+
+Down or Tab leaves the search box so you can navigate results with `j` / `k` or
+arrows. Up on the first result, or `/` outside the input, returns to the search
+box. Enter opens the selected result; Esc closes search.
+
+In settings, **Sync all conversations** builds a local archive of conversation
+text and metadata, including closed threads, for later search. It does not
+download attachment/image files. Already archived closed threads are normally
+skipped on later syncs; old content formats are upgraded once. Open and snoozed
+threads are fetched again when you sync. The archive is not a live mirror.
+
+### Unread indicators and notifications
+
+The bar flashes while fetched messages in **Open** conversations remain unread
+locally. Conversation rows and unread message cards show a dot. Highlighting a
+conversation in the focused panel marks its messages read; you do not need to
+focus the thread pane. Messages arriving while it remains highlighted are also
+marked read. Read state survives restarts and is independent of Intercom's read
+status. Background fetching does not mark open conversations read. Closed and
+snoozed conversations are treated as read, and your own replies/notes are excluded.
+Cached unread conversations missing from the latest inbox response remain
+reachable at the top of their matching filter.
+
+Desktop notifications show the sender and a preview; clicking one opens that
+conversation in the widget. They are based on newly waiting conversations or an
+increase in Intercom's `waiting_since` timestamp, with at most five notifications
+per refresh. A follow-up that does not advance that timestamp may become unread
+without producing a toast. A first load without a previous snapshot seeds the
+notification baseline rather than notifying for the existing backlog.
 
 ### Attachments
 
@@ -149,9 +250,8 @@ so native chooser code never loads inside Quickshell. The panel releases input
 while the picker is open and restores focus when it closes. Canceling or failing
 to open a picker keeps the draft and selected attachments intact.
 
-This requires the system Python's `python-gobject`, `xdg-desktop-portal`, and a
-FileChooser backend, normally already installed with Omarchy. Closing the panel
-also cancels its picker; it does not leave a dialog running in the background.
+Closing the panel also cancels its picker; it does not leave a dialog running
+in the background. See [Requirements](#requirements) for portal dependencies.
 
 Attachment names are included in local search. Cached conversations gain file
 attachments when refreshed; **Sync all conversations** upgrades older archive
@@ -182,48 +282,105 @@ without downloading the image files themselves.
 
 ## Keybinding
 
-Omarchy does not ship a shortcut for this plugin. Add one in
-`~/.config/hypr/bindings.lua`. **SUPER+SHIFT+I** is free in Omarchy's defaults
-(the nearby **SUPER+CTRL+I** toggles idle lock). Confirm with
-`omarchy menu keybindings --print` before binding.
+To add a shortcut for this plugin (e.g. **SUPER+SHIFT+I**), add this to
+`~/.config/hypr/bindings.lua` (you may want to check for conflicts with
+`omarchy menu keybindings --print` before binding):
 
 ```lua
-o.bind("SUPER + SHIFT + I", "Intercom", "omarchy-shell intercom-notifier toggle")
+o.bind("SUPER + SHIFT + I", "Intercom", "omarchy-shell omarchy-intercom-client toggle")
 ```
 
 If that key is already bound, unbind it first:
 
 ```lua
 hl.unbind("SUPER + SHIFT + I")
-o.bind("SUPER + SHIFT + I", "Intercom", "omarchy-shell intercom-notifier toggle")
+o.bind("SUPER + SHIFT + I", "Intercom", "omarchy-shell omarchy-intercom-client toggle")
 ```
 
-Hyprland reloads the file on save. The shortcut toggles the panel; Esc also
-closes it.
+Hyprland reloads the file on save. Validate with `hyprctl reload` and
+`hyprctl configerrors`. The shortcut toggles the panel, or restores focus if it
+is already open after a workspace/monitor switch.
+
+## Local data and sign-out
+
+Data is stored in `~/.config/omarchy/omarchy-intercom-client/`, or
+`$XDG_CONFIG_HOME/omarchy/omarchy-intercom-client/` when that variable is set:
+
+| Path | Contents |
+| --- | --- |
+| `token` | OAuth access token (unless a custom token file is configured) |
+| `oauth.json` | Shared app Client ID and secret |
+| `config.json` | API region, workspace, teammate profile, panel size, filter, and last viewed conversation |
+| `cache.json` | Inbox/thread cache and local read state |
+| `drafts.json` | Draft text, note mode, and local attachment paths |
+| `scheduled.json` | Scheduled messages, send times, and local attachment paths |
+| `archive/` | Synced thread records, search index, and sync status |
+
+These files contain credentials and customer data and are not encrypted by the
+plugin. Do not commit or share them.
+
+**Sign out** removes saved token files (including configured and plugin-local
+fallbacks) and clears the active inbox cache/profile. It leaves app credentials,
+preferences, drafts, scheduled sends, and the archive in place. If
+`INTERCOM_ACCESS_TOKEN` is set in the shell's environment, unset it there to
+finish signing out. Signing out locally does not revoke the app in Intercom.
+Cancel scheduled sends before switching accounts; the queue is not scoped to a
+particular teammate or workspace.
 
 ## Remove
 
+Sign out first if you also want to remove saved tokens, then remove the plugin:
+
 ```bash
-omarchy plugin remove intercom-notifier
+omarchy plugin remove omarchy-intercom-client
 ```
 
-You can also sign out from the panel profile, or delete
-`~/.config/omarchy/intercom-notifier/token` and `~/.config/omarchy/intercom-notifier/oauth.json`.
+Removing the plugin does not delete its separate data directory. After removal,
+delete that directory yourself if you want to erase credentials, customer data,
+drafts, and the scheduled queue. Custom token files and attachments saved to
+other locations must be removed separately. Revoke the app in Intercom if you
+also want to invalidate its authorization.
 
 ## Development
+
+`Panel.qml` implements the widget/reader, `Service.qml` handles processes and
+local state, and `Model.js` contains formatting and state helpers.
+`intercom-fetch` handles the API, OAuth, archive, and attachment transfers;
+`intercom-file-picker` runs the portal chooser outside Quickshell.
+
+The test suite needs Node.js, Python 3, Omarchy's shell imports and plugin CLI,
+Quickshell, and Qt 6's `qmllint` and `qtpaths`. From the repository root:
 
 ```bash
 omarchy plugin validate .
 ./tests/run.sh
 ```
 
-The test suite requires Qt 6's `qmllint` and fails on lint warnings. Run
-`bash tests/lint.sh` for lint alone; `QMLLINT` can select a Qt 6 executable when
-Qt 5 is also installed. The lint setup resolves Omarchy's `qs.*` imports and
-supplies Quickshell's missing process-exit enum metadata in a temporary overlay,
-without modifying installed files or disabling checks.
+`tests/run.sh` runs the JavaScript model tests, Python API and file-picker tests,
+manifest validation, QML lint and lint regression tests, and QML/image smoke
+tests. Tests use isolated data, fake API/picker helpers, and a loopback image
+server; no Intercom credentials are needed. QML lint fails on warnings.
 
-For a running reader, `omarchy-shell intercom-notifier images` reports image
-block counts, preview geometry, loading status, and viewport eligibility without
-including message text or signed image URLs. If a plugin reload retains old QML
-code, `omarchy restart shell` starts a fresh QML engine.
+Run `bash tests/lint.sh` for lint alone; `QMLLINT` can select a Qt 6 executable
+when Qt 5 is also installed. The lint setup resolves Omarchy's `qs.*` imports
+and supplies Quickshell's missing process-exit enum metadata in a temporary
+overlay, without modifying installed files or disabling checks.
+
+With the plugin enabled, these IPC commands are available:
+
+```bash
+omarchy-shell omarchy-intercom-client toggle
+omarchy-shell omarchy-intercom-client refresh
+omarchy-shell omarchy-intercom-client conversation CONVERSATION_ID
+omarchy-shell omarchy-intercom-client status
+omarchy-shell omarchy-intercom-client images
+```
+
+`status` reports counts and unread diagnostics. For a running reader, `images`
+reports image block counts, preview geometry, loading status, and viewport
+eligibility without including message text or signed image URLs. If a plugin
+reload retains old QML code, `omarchy restart shell` starts a fresh QML engine.
+
+## License
+
+[MIT](LICENSE).
