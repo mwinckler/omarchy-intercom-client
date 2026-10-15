@@ -72,11 +72,11 @@ Panel {
   property bool scrollPendingSelection: false
   property bool pinViewedSelection: false
   property bool filterChordActive: false
-  readonly property var inboxRows: Model.includeUnreadConversations(intercom.openConversations, [
+  readonly property var inboxRows: intercom.inboxLoaded ? Model.includeUnreadConversations(intercom.openConversations, [
     Model.inboxCacheConversations(intercom.inboxCache),
     intercom.conversations,
     Model.cachedConversations(intercom.threadCache)
-  ], intercom.localReadState)
+  ], intercom.localReadState) : []
   property var inboxConversations: Model.filterInbox(root.inboxRows, intercom.inboxFilter)
   onInboxConversationsChanged: {
     if (root.opened && !root.settingsOpen && !root.searchOpen) root.ensureInboxCursor()
@@ -124,7 +124,9 @@ Panel {
     if (wanted !== "" && threadId === wanted) return true
     return root.threadMatchesInbox
   }
-  readonly property bool expandedAreaLoading: !root.searchOpen && intercom.openLoading && inboxConversations.length === 0
+  readonly property bool expandedAreaLoading: !root.searchOpen
+    && ((!intercom.inboxLoaded && intercom.openMessage === "")
+      || (intercom.openLoading && inboxConversations.length === 0))
   readonly property bool searchRemoteLoading:
     root.searchOpen && root.searchRemote
     && String(root.searchQuery || "").trim() !== ""
@@ -152,7 +154,7 @@ Panel {
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
 
   function prefetchVisibleThreads(force) {
-    if (!root.opened || root.settingsOpen) return
+    if (!root.opened || root.settingsOpen || root.expandedAreaLoading) return
     var rows = root.searchOpen ? root.searchResults : root.inboxConversations
     var visibleRows = []
     if (inboxFlick) {
@@ -636,7 +638,7 @@ Panel {
   }
 
   function displayedConversationId() {
-    if (!root.opened || root.settingsOpen) return ""
+    if (!root.opened || root.settingsOpen || root.expandedAreaLoading) return ""
     if (root.searchOpen)
       return String((root.selectedSearchConversation() || {}).id || "").trim()
     return String(root.expandConversationId || "").trim()

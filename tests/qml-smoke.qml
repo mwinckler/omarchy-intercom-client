@@ -12,6 +12,118 @@ ShellRoot {
   property list<url> selectedUploads: ["file:///home/test/screen%20shot.png", "file:///home/test/log.txt"]
   property int attachmentDialogStage: 0
 
+  function probeInboxOnboarding(service) {
+    service.clearSession()
+    service.workspaceId = "smoke"
+    service.state = "ready"
+    service.inboxFilter = "open"
+    widget.compositorFocusLost = true
+    widget.expandConversationId = "preview"
+    if (service.inboxLoaded || !widget.expandedContentLoading) return false
+
+    // Waiting previews can arrive before the complete Open inbox. They must
+    // not reveal the sidebar, become selectable, or flash the tray.
+    service.applyOutput(JSON.stringify({
+      state: "ready", workspaceId: "smoke", openCount: 1,
+      conversations: [{ id: "preview", state: "open", messages: [{ id: "preview-message", body: "Old preview" }] }]
+    }), 0)
+    widget.moveExpanded(0, 1)
+    widget.acknowledgeHighlightedConversation()
+    if (service.pendingUrgent.preview || service.barUrgent || service.initialReadSeeded
+        || service.localReadState.preview["$preview-message"] !== true
+        || service.inboxLoaded || !service.openLoading
+        || !widget.expandedContentLoading || widget.inboxConversations.length !== 0
+        || widget.displayedConversationId() !== "") return false
+
+    // An unrelated response cannot finish loading the selected inbox.
+    service._inboxRequested = "closed"
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [] }), 0)
+    if (service.inboxLoaded || !widget.expandedContentLoading || service.initialReadSeeded) return false
+
+    // Failed first loads show the error, not previews or an endless spinner.
+    service._inboxRequested = "open"
+    service.applyInbox(JSON.stringify({ state: "error", message: "Could not load conversations." }), 1)
+    service.openLoading = false
+    if (service.inboxLoaded || widget.expandedContentLoading || service.initialReadSeeded
+        || widget.inboxConversations.length !== 0 || service.openMessage === "") return false
+
+    service.openMessage = ""
+    service.openLoading = true
+    if (!widget.expandedContentLoading) return false
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [
+      { id: "actually-open", state: "open", messages: [{ id: "open-message", body: "Open conversation" }] }
+    ] }), 0)
+    service.openLoading = false
+    if (!service.inboxLoaded || widget.expandedContentLoading
+        || widget.inboxConversations.length !== 1
+        || widget.inboxConversations[0].id !== "actually-open"
+        || service.pendingUrgent.preview || service.barUrgent || !service.initialReadSeeded
+        || service.localReadState["actually-open"]["$open-message"] !== true) return false
+    service.observeMessages({ id: "actually-open", state: "open", messages: [
+      { id: "older-history", createdAt: service.initialReadBefore - 60, body: "History loaded after the inbox" }
+    ] }, false)
+    if (service.barUrgent || service.localReadState["actually-open"]["$older-history"] !== true) return false
+    // Later messages still create unread alerts; the initial load is not a mute.
+    service.observeMessages({ id: "actually-open", state: "open", messages: [
+      { id: "open-message", body: "Open conversation" },
+      { id: "new-message", body: "Arrived after onboarding" }
+    ] }, false)
+    if (!service.barUrgent || !service.pendingUrgent["actually-open"]
+        || !Model.messageUnread(service.localReadState, "actually-open", { id: "new-message" })
+        || Model.messageUnread(service.localReadState, "actually-open", { id: "open-message" })) return false
+    // Restarting with a complete inbox preserves genuine unread messages.
+    var snapshot = Model.parseDiskCache(Model.serializeDiskCache(service.cacheSnapshot()))
+    service.restoreDiskCache(snapshot)
+    if (!service.initialReadSeeded || service.initialReadBefore !== snapshot.initialReadBefore || !service.barUrgent
+        || !Model.messageUnread(service.localReadState, "actually-open", { id: "new-message" })) return false
+    service.markConversationRead("actually-open")
+    if (widget.inboxConversations.length !== 1 || service.barUrgent) return false
+
+    // Readiness follows the selected source, not the last successful request.
+    // Returning from a cached filter must restore Open, not reuse its rows.
+    service.inboxFilter = "snoozed"
+    if (service.inboxLoaded || !widget.expandedContentLoading
+        || widget.inboxConversations.length !== 0) return false
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [
+      { id: "actually-open", state: "open" }
+    ] }), 0)
+    if (service.inboxLoaded || !widget.expandedContentLoading) return false
+    service.inboxFilter = "closed"
+    if (!service.showCachedInbox() || !service.inboxLoaded
+        || widget.expandedContentLoading || widget.inboxConversations.length !== 0) return false
+    service.inboxFilter = "open"
+    if (!service.showCachedInbox() || !service.inboxLoaded
+        || widget.expandedContentLoading || widget.inboxConversations.length !== 1
+        || widget.inboxConversations[0].id !== "actually-open") return false
+
+    // Subsequent refreshes keep the confirmed list visible.
+    service.openLoading = true
+    if (widget.expandedContentLoading) return false
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [] }), 0)
+    service.openLoading = false
+    if (!service.inboxLoaded || widget.expandedContentLoading
+        || widget.inboxConversations.length !== 0) return false
+
+    // Returning users can still open a complete cached inbox immediately,
+    // including a successfully fetched inbox with no conversations.
+    for (var rows of [[], [{ id: "cached-open", state: "open" }]]) {
+      service.clearSession()
+      if (service.inboxLoaded || service.initialReadSeeded) return false
+      service.workspaceId = "smoke"
+      service.state = "ready"
+      service.inboxCache = Model.writeInboxCache({}, "open", rows, rows.length, Date.now())
+      if (!service.showCachedInbox() || !service.inboxLoaded
+          || widget.expandedContentLoading || widget.inboxConversations.length !== rows.length) return false
+    }
+    service.clearSession()
+    service.workspaceId = "smoke"
+    service.state = "ready"
+    service._inboxRequested = "open"
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [] }), 0)
+    widget.expandConversationId = ""
+    return true
+  }
+
   function openAttachmentComposer() {
     var conversation = { id: "picker-smoke", state: "open", messages: [] }
     probeService.state = "ready"
@@ -155,6 +267,12 @@ ShellRoot {
       var service = shell.probeService
       if (!service) {
         console.error("intercom qml smoke failed: missing service")
+        Qt.quit()
+        return
+      }
+      if (!shell.probeInboxOnboarding(service)) {
+        console.error("intercom qml smoke failed: first inbox loading exposed previews or lost confirmed conversations")
+        widget.close()
         Qt.quit()
         return
       }

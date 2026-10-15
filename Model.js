@@ -1025,6 +1025,7 @@ function emptyDiskCache() {
     conversations: [],
     inboxes: {},
     threads: {},
+    initialReadBefore: 0,
     localReadState: {}
   }
 }
@@ -1070,6 +1071,7 @@ function parseDiskCache(raw) {
     conversations: conversations,
     inboxes: parseInboxCache(parsed.inboxes),
     threads: parseThreadCache(parsed.threads),
+    initialReadBefore: Math.max(0, Math.floor(numberValue(parsed.initialReadBefore, 0))),
     localReadState: normalizeLocalReadState(parsed.localReadState)
   }
 }
@@ -1099,6 +1101,7 @@ function serializeDiskCache(snapshot) {
     },
     inboxes: parseInboxCache(row.inboxes),
     threads: parseThreadCache(row.threads),
+    initialReadBefore: Math.max(0, Math.floor(numberValue(row.initialReadBefore, 0))),
     localReadState: normalizeLocalReadState(row.localReadState)
   }
   return JSON.stringify(payload)
@@ -1381,7 +1384,7 @@ function markConversationRead(value, conversationId) {
   return next
 }
 
-function updateLocalReadState(value, conversation, read, ownEmail) {
+function updateLocalReadState(value, conversation, read, ownEmail, initialReadBefore) {
   var next = normalizeLocalReadState(value)
   var conv = normalizeConversation(conversation)
   if (!isSafeConversationId(conv.id)) return next
@@ -1397,7 +1400,10 @@ function updateLocalReadState(value, conversation, read, ownEmail) {
     if (email !== "" && (msg.kind === "teammate" || msg.kind === "note")
         && msg.email.trim().toLowerCase() === email) continue
     var key = localMessageKey(msg)
-    if (read || !Object.prototype.hasOwnProperty.call(known, key)) known[key] = !!read
+    // Full threads can reveal old history after the initial inbox previews.
+    // Preserve explicit unread flags, but don't alert for that initial backlog.
+    if (read || !Object.prototype.hasOwnProperty.call(known, key))
+      known[key] = !!read || (msg.createdAt > 0 && msg.createdAt < numberValue(initialReadBefore, 0))
   }
   next[conv.id] = known
   return next

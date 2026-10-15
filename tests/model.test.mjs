@@ -51,6 +51,29 @@ assert.equal(model.messageUnread(localReads, "local", { id: "other" }), true);
 assert.equal(model.messageUnread(localReads, "local", firstMessage), false);
 assert.equal(model.messageUnread(localReads, "missing", firstMessage), false);
 
+// Historical messages loaded after onboarding stay seen, but later arrivals
+// (including ones in the baseline second or without timestamps) remain unread.
+const baselineReads = model.updateLocalReadState({ local: { $existing: false } }, {
+  id: "local", state: "open", messages: [
+    { id: "existing", createdAt: 50, body: "Already unread" },
+    { id: "history", createdAt: 100, body: "Older history loaded later" },
+    { id: "same-second", createdAt: 200, body: "Arrived in the baseline second" },
+    { id: "later", createdAt: 201, body: "New message" },
+    { id: "undated", body: "Unknown timestamp" }
+  ]
+}, false, "", 200);
+assert.equal(baselineReads.local.$existing, false);
+assert.equal(baselineReads.local.$history, true);
+assert.equal(baselineReads.local["$same-second"], false);
+assert.equal(baselineReads.local.$later, false);
+assert.equal(baselineReads.local.$undated, false);
+const baselineCache = model.parseDiskCache(model.serializeDiskCache({
+  state: "ready", initialReadBefore: 200, localReadState: baselineReads
+}));
+assert.equal(baselineCache.initialReadBefore, 200);
+assert.equal(baselineCache.localReadState.local.$history, true);
+assert.equal(model.parseDiskCache('{"state":"ready"}').initialReadBefore, 0);
+
 // Every status other than Open clears existing unread flags, even without messages.
 for (const state of ["closed", "snoozed", "unknown", "", undefined]) {
   let reads = model.updateLocalReadState({}, localThread, false);

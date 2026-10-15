@@ -35,6 +35,9 @@ Item {
   property int closedCount: 0
   property int snoozedCount: 0
   property int allCount: 0
+  // Only a complete inbox snapshot can reveal the sidebar, not waiting previews.
+  property string inboxLoadedSource: ""
+  readonly property bool inboxLoaded: inboxLoadedSource === Model.inboxFetchFilter(inboxFilter)
   property bool openLoading: false
   property bool inboxQueued: false
   property string inboxQueuedSource: ""
@@ -66,6 +69,8 @@ Item {
   property bool viewedLoaded: false
   property var pendingUrgent: ({})
   property var localReadState: ({})
+  property bool initialReadSeeded: false
+  property double initialReadBefore: 0
   property bool barUrgent: false
   property bool prefsQueued: false
   property var seenConversations: ({})
@@ -228,6 +233,10 @@ Item {
       message = "No conversations are waiting for a reply."
     seedThreadCache(parsed.conversations)
     notifyNewMessages(parsed)
+    if (!inboxLoaded && !openLoading)
+      loadInbox()
+    if (!initialReadSeeded && Model.inboxFetchFilter(inboxFilter) !== "open")
+      loadInbox("open")
     schedulePersistCache()
   }
 
@@ -336,7 +345,10 @@ Item {
   function observeMessages(conversation, read) {
     var id = String((conversation || {}).id || "")
     var previous = (localReadState || {})[id] || {}
-    var next = Model.updateLocalReadState(localReadState, conversation, !!read, adminEmail)
+    // The first complete Open inbox establishes the baseline, not an unread backlog.
+    var next = Model.updateLocalReadState(
+      localReadState, conversation, !!read || !initialReadSeeded, adminEmail, initialReadBefore
+    )
     var observed = next[id] || {}
     var hasNew = false
     for (var key in observed) {
@@ -452,7 +464,7 @@ Item {
 
   function showCachedInbox() {
     var source = Model.inboxFetchFilter(inboxFilter)
-    if (inboxLiveSource === source) return false
+    if (inboxLiveSource === source && inboxLoaded) return true
     var snap = Model.readInboxCache(inboxCache, source)
     var conversations = Model.applyPendingInboxMoves(
       snap.conversations,
@@ -466,6 +478,7 @@ Item {
     if (source === "open" && openCount < conversations.length)
       openCount = conversations.length
     seedThreadCache(conversations)
+    inboxLoadedSource = source
     return true
   }
 
@@ -500,6 +513,7 @@ Item {
       conversations: conversations,
       inboxes: inboxCache,
       threads: threadCache,
+      initialReadBefore: initialReadBefore,
       localReadState: localReadState
     }
   }
@@ -564,6 +578,9 @@ Item {
       message = "No conversations are waiting for a reply."
     threadCache = row.threads || {}
     inboxCache = row.inboxes || {}
+    var openSnapshot = Model.readInboxCache(inboxCache, "open")
+    initialReadSeeded = openSnapshot.fetchedAt > 0 || openSnapshot.conversations.length > 0
+    initialReadBefore = row.initialReadBefore || 0
     localReadState = Model.restoreLocalReadState(row)
     pendingUrgent = Model.localUnreadConversations(localReadState)
     refreshBarUrgent()
@@ -599,7 +616,12 @@ Item {
       ? Model.inboxFetchFilter(source)
       : Model.inboxFetchFilter(inboxFilter)
     var viewing = wanted === Model.inboxFetchFilter(inboxFilter)
-    if (viewing) showCachedInbox()
+    if (viewing) {
+      if (!showCachedInbox() && !inboxLoaded)
+        openConversations = []
+      openLoading = true
+      openMessage = ""
+    }
     if (inboxProcess.running) {
       inboxQueued = true
       inboxQueuedSource = wanted
@@ -607,10 +629,6 @@ Item {
     }
     inboxQueued = false
     inboxQueuedSource = ""
-    if (viewing) {
-      openLoading = true
-      openMessage = ""
-    }
     _inboxRequested = wanted
     _inboxStdout = ""
     _inboxStderr = ""
@@ -662,6 +680,10 @@ Item {
       refreshBarUrgent()
     }
     seedThreadCache(merged)
+    if (source === "open" && !initialReadSeeded) {
+      initialReadBefore = Math.floor(Date.now() / 1000)
+      initialReadSeeded = true
+    }
     if (source !== Model.inboxFetchFilter(inboxFilter)) {
       schedulePersistCache()
       return
@@ -672,6 +694,7 @@ Item {
     if (source === "open" && openCount < merged.length)
       openCount = merged.length
     openMessage = ""
+    inboxLoadedSource = source
     schedulePersistCache()
   }
 
@@ -1043,6 +1066,7 @@ Item {
     closedCount = 0
     snoozedCount = 0
     allCount = 0
+    inboxLoadedSource = ""
     openLoading = false
     inboxQueued = false
     inboxQueuedSource = ""
@@ -1065,6 +1089,8 @@ Item {
     seenSeeded = false
     pendingUrgent = ({})
     localReadState = ({})
+    initialReadSeeded = false
+    initialReadBefore = 0
     barUrgent = false
     replyMessage = ""
     closing = false

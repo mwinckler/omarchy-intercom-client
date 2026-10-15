@@ -50,8 +50,9 @@ omarchy plugin update omarchy-intercom-client
 
 ## Sign in
 
-One teammate creates a private Intercom app in the
-[Developer Hub](https://app.intercom.com/a/developers) and enables **Use OAuth**.
+In Intercom, one teammate creates a private Intercom app in the
+Developer Hub (Settings -> Integrations -> Developer Hub)
+and enables **Use OAuth**.
 Everyone else signs in with that same app. Do not share a workspace Access Token;
 that credential can post as any admin.
 
