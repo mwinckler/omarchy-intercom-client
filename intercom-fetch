@@ -21,6 +21,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 INTERCOM_VERSION = "2.14"
+CONTENT_VERSION = 2
 UNSTABLE_VERSION = "Unstable"
 DEFAULT_LIMIT = 150
 SYNC_PAGE_SIZE = 150
@@ -361,6 +362,162 @@ def format_message_body(value: object) -> str:
     if not message_plain_text(styled):
         return ""
     return styled
+
+
+def image_url(value: object) -> str:
+    """Image sources are untrusted; never allow Qt's local/resource URL schemes."""
+    text = is_safe_http_url(value)
+    if not text or any(ord(ch) < 32 or ord(ch) == 127 for ch in text) or "\\" in text:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            return ""
+        parsed.port  # Reject malformed ports as well.
+    except ValueError:
+        return ""
+    return text
+
+
+def image_dimension(value: object) -> int:
+    try:
+        return max(0, min(32768, int(value or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def image_identity(url: str) -> str:
+    """Ignore rotating credentials, but retain query parameters identifying content."""
+    base, separator, query = url.split("#", 1)[0].partition("?")
+    stable = []
+    for part in query.split("&") if separator else []:
+        key = urllib.parse.unquote(part.split("=", 1)[0]).lower()
+        if key in {"signature", "sig", "expires", "token", "policy", "key-pair-id", "awsaccesskeyid"} or key.startswith(("x-amz-", "x-goog-")):
+            continue
+        stable.append(part)
+    return base + ("?" + "&".join(stable) if stable else "")
+
+
+def image_asset_key(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    # Intercom serves the same upload through its CDN and a workspace-specific
+    # attachment hostname, often with different signatures on each URL.
+    if parsed.path.startswith("/i/o/") and re.search(
+        r"(^|\.)(intercomcdn\.com|intercom-attachments-[1-9]\.com)$", host
+    ):
+        return "intercom:" + parsed.path
+    return url
+
+
+def image_block(value: dict, link: str = "") -> dict | None:
+    url = image_url(value.get("url"))
+    if not url:
+        return None
+    return {
+        "type": "image", "url": url,
+        "name": str(value.get("name") or ""),
+        "alt": str(value.get("alt") or value.get("name") or "Image"),
+        "width": image_dimension(value.get("width")),
+        "height": image_dimension(value.get("height")),
+        "linkUrl": image_url(link) or url,
+    }
+
+
+class MessageContentParser(HTMLParser):
+    """Split around images, balancing text formatting on both sides of each image.
+
+    Each text fragment still goes through the existing allowlist formatter. Raw
+    HTML (especially img tags) is never passed to Qt's text renderer.
+    """
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.pending: list[str] = []
+        self.active: list[tuple[str, str, str]] = []
+        self.blocks: list[dict] = []
+
+    def flush(self) -> None:
+        text = "".join(self.pending) + "".join(f"</{tag}>" for tag, _, _ in reversed(self.active))
+        styled = format_message_body(text)
+        if styled:
+            self.blocks.append({"type": "text", "text": styled})
+        self.pending = [markup for _, markup, _ in self.active]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "img":
+            link = next((href for name, _, href in self.active if name == "a" and href), "")
+            block = image_block({**values, "url": values.get("src")}, link)
+            if block:
+                self.flush()
+                self.blocks.append(block)
+            else:
+                label = str(values.get("alt") or "Image unavailable")
+                self.pending.append(html.escape(f"[{label}]"))
+            return
+        markup = self.get_starttag_text()
+        self.pending.append(markup)
+        if tag in ("b", "strong", "i", "em", "a"):
+            self.active.append((tag, markup, image_url(values.get("href")) if tag == "a" else ""))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "img":
+            return
+        self.pending.append(f"</{tag}>")
+        for index in range(len(self.active) - 1, -1, -1):
+            if self.active[index][0] == tag:
+                del self.active[index:]
+                break
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in ("img", "br", "hr"):
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        self.pending.append(html.escape(data))
+
+
+def format_message_content(value: object, attachments: object = None) -> tuple[str, list[dict]]:
+    text = format_message_body(value)
+    blocks = [{"type": "text", "text": text}] if text else []
+    if re.search(r"<img\b", str(value or ""), re.I):
+        parser = MessageContentParser()
+        parser.feed(str(value or ""))
+        parser.close()
+        parser.flush()
+        blocks = parser.blocks
+    # Preserve repeated inline images, but don't append the same attachment again.
+    inline: dict[str, list[dict]] = {}
+    for block in blocks:
+        if block["type"] == "image":
+            inline.setdefault(image_asset_key(block["url"]), []).append(block)
+    for attachment in attachments if isinstance(attachments, list) else []:
+        if not isinstance(attachment, dict):
+            continue
+        mime = str(attachment.get("content_type") or "").lower().split(";", 1)[0].strip()
+        path = urllib.parse.urlsplit(image_url(attachment.get("url"))).path.lower()
+        if not (mime.startswith("image/") or (not mime and re.search(r"\.(png|jpe?g|gif|webp|avif|bmp|svg)$", path))):
+            continue
+        block = image_block(attachment)
+        if not block:
+            continue
+        key = image_asset_key(block["url"])
+        existing = inline.get(key)
+        if existing:
+            for image in existing:
+                for field in ("name", "width", "height"):
+                    if not image.get(field):
+                        image[field] = block[field]
+            continue
+        inline[key] = [block]
+        blocks.append(block)
+    if not text:
+        text = "<br>".join(
+            html.escape("Image: " + (block["name"] or block["alt"])) if block["type"] == "image" else block["text"]
+            for block in blocks
+        )
+    return text, blocks if inline or re.search(r"<img\b", str(value or ""), re.I) else []
 
 
 def truncate(value: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -838,11 +995,14 @@ def extract_messages(conv: dict) -> list[dict]:
     messages: list[dict] = []
     seen: set[str] = set()
 
-    def add(message_id: str, author: object, part_type: str, created: int, body: str) -> None:
-        text = format_message_body(body)
+    def add(message_id: str, author: object, part_type: str, created: int, body: str, attachments: object) -> None:
+        text, blocks = format_message_content(body, attachments)
         if not text:
             return
-        key = str(message_id or "").strip() or f"{created}:{text[:80]}"
+        # Signed URL query strings can change without this being a new message.
+        media_key = "|".join(image_identity(block["url"]) for block in blocks if block["type"] == "image")
+        fallback = f"{created}:{text[:80]}" + (f":{media_key}" if media_key else "")
+        key = str(message_id or "").strip() or fallback
         if key in seen:
             return
         seen.add(key)
@@ -853,20 +1013,21 @@ def extract_messages(conv: dict) -> list[dict]:
             "kind": message_kind(part_type, author),
             "createdAt": max(0, int(created or 0)),
             "body": text,
+            **({"blocks": blocks} if blocks else {}),
         })
 
     source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
     source_body = source.get("body") or ""
-    if source_body:
+    if source_body or source.get("attachments"):
         created = unix_time(source.get("created_at")) or unix_time(conv.get("created_at"))
-        add(str(source.get("id") or "source"), source.get("author"), "", created, source_body)
+        add(str(source.get("id") or "source"), source.get("author"), "", created, source_body, source.get("attachments"))
     for part in conversation_parts_list(conv):
         part_type = str(part.get("part_type") or "").strip().lower()
         author = part.get("author")
         if not is_message_part(part_type, author):
             continue
         created = unix_time(part.get("created_at"))
-        add(str(part.get("id") or ""), author, part_type, created, part.get("body") or "")
+        add(str(part.get("id") or ""), author, part_type, created, part.get("body") or "", part.get("attachments"))
     messages.sort(key=lambda item: (item.get("createdAt") or 0, item.get("id") or ""))
     return messages
 
@@ -874,7 +1035,7 @@ def extract_messages(conv: dict) -> list[dict]:
 def latest_public_message(conv: dict) -> tuple[object, str]:
     messages: list[tuple[int, object, str]] = []
     source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
-    source_body = strip_html(source.get("body") or "")
+    source_body = message_plain_text(format_message_content(source.get("body"), source.get("attachments"))[0])
     if source_body:
         created = unix_time(source.get("created_at")) or unix_time(conv.get("created_at"))
         messages.append((created, source.get("author"), source_body))
@@ -882,7 +1043,7 @@ def latest_public_message(conv: dict) -> tuple[object, str]:
         author = part.get("author")
         if not is_message_part(part.get("part_type"), author, public_only=True):
             continue
-        body = strip_html(part.get("body") or "")
+        body = message_plain_text(format_message_content(part.get("body"), part.get("attachments"))[0])
         if not body:
             continue
         messages.append((unix_time(part.get("created_at")), author, body))
@@ -990,6 +1151,7 @@ def should_fetch_archive_thread(state: object, stored: bool) -> bool:
 
 def archive_thread_record(conv: dict, region: str, workspace_id: str) -> dict:
     thread = normalize_thread(conv, region, workspace_id)
+    thread["contentVersion"] = CONTENT_VERSION
     sender, email, snippet = conversation_identity(conv)
     thread["from"] = sender
     thread["email"] = email
@@ -2434,7 +2596,8 @@ def save_archive_index(index: dict[str, dict], synced_at: int) -> None:
 
 
 def archive_thread_stored(conversation_id: str) -> bool:
-    return os.path.isfile(archive_thread_path(conversation_id))
+    record = read_json_file(archive_thread_path(conversation_id))
+    return isinstance(record, dict) and record.get("contentVersion") == CONTENT_VERSION
 
 
 def store_archive_thread(record: dict) -> None:
@@ -2646,6 +2809,10 @@ def archive_row_haystack(row: dict) -> str:
             if not isinstance(msg, dict):
                 continue
             parts.extend([msg.get("body"), msg.get("from"), msg.get("email")])
+            blocks = msg.get("blocks")
+            for block in blocks if isinstance(blocks, list) else []:
+                if isinstance(block, dict) and block.get("type") == "image":
+                    parts.extend([block.get("name"), block.get("alt")])
     return " ".join(str(part or "") for part in parts).lower()
 
 

@@ -1513,6 +1513,24 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refreshNow(); return "ok" }
+    function images(): string {
+      var rows = []
+      for (var i = 0; i < messageRepeater.count; i++) {
+        var row = messageRepeater.itemAt(i) as MessageRow
+        if (row) rows.push({
+          imageBlocks: Model.messageBlocks(row.message).filter(function(block) { return block.type === "image" }).length,
+          height: row.height, implicitHeight: row.implicitHeight,
+          previews: row.imageDiagnostics()
+        })
+      }
+      return JSON.stringify({
+        opened: root.opened, showingSelectedThread: root.showingSelectedThread,
+        messageCount: intercom.messages.length,
+        viewportWidth: threadFlick.width, viewportHeight: threadFlick.height,
+        contentY: threadFlick.contentY, contentHeight: threadFlick.contentHeight,
+        rows: rows
+      })
+    }
     function conversation(id: string): string {
       root.openExpandedConversation(id)
       return "ok"
@@ -2531,6 +2549,8 @@ Panel {
                     required property int index
                     width: threadColumn.width
                     message: modelData
+                    imagesEnabled: root.opened && !root.settingsOpen && root.showingSelectedThread
+                    imageViewport: threadFlick
                     unread: Model.conversationIsOpen(intercom.thread)
                       && Model.messageUnread(intercom.localReadState, intercom.threadId, modelData)
                     unreadColor: root.urgent

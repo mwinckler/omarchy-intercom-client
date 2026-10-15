@@ -8,6 +8,12 @@ const model = { console, Date, JSON, Object, Array, Number, String, Math, isFini
 vm.createContext(model);
 vm.runInContext(source, model, { filename: "Model.js" });
 
+assert.equal(model.arrayValue(null).length, 0);
+assert.equal(model.arrayValue({ 0: "not a sequence", length: 1 }).length, 0);
+const sequence = model.arrayValue({ 0: "Qt sequence element", length: 1, slice: Array.prototype.slice });
+assert.equal(Array.isArray(sequence), true);
+assert.equal(sequence[0], "Qt sequence element");
+
 const firstMessage = { id: "m1", kind: "customer", createdAt: 100, body: "Hello" };
 const secondMessage = { id: "m2", kind: "customer", createdAt: 100, body: "Follow-up" };
 const localThread = { id: "local", state: "open", waitingSince: 100, messages: [firstMessage] };
@@ -105,6 +111,43 @@ let anonymousReads = model.updateLocalReadState({}, { id: "cards", state: "open"
 assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), true);
 anonymousReads = model.updateLocalReadState(anonymousReads, { id: "cards", state: "open", messages: [anonymousMessage] }, true);
 assert.equal(model.messageUnread(anonymousReads, "cards", anonymousMessage), false);
+
+// Media survives all normalization/cache paths, including messages without text.
+const imageBlock = { type: "image", url: "https://downloads.intercomcdn.com/a.png?signature=old&expires=1",
+  name: "invoice.png", alt: "Invoice screenshot", width: 800, height: 600 };
+const imageMessage = { id: "image-only", createdAt: 101, body: "", blocks: [imageBlock] };
+assert.equal(model.normalizeMessages([imageMessage]).length, 1);
+assert.equal(model.messageBlocks(imageMessage)[0].url, imageBlock.url);
+assert.equal(model.messageBlocks({ body: "Before<br><br>After" }).length, 2);
+assert.equal(model.messageBlocks({ blocks: [{ type: "text", text: 'Before<img src="https://tracker.example/">' }, imageBlock] })[0].text, "Before");
+const mediaCache = model.parseDiskCache(model.serializeDiskCache({ state: "ready", threads:
+  model.writeCachedThread({}, { id: "media", state: "open", messages: [imageMessage] }, 100)
+}));
+assert.equal(mediaCache.threads.media.conversation.messages[0].blocks[0].url, imageBlock.url);
+assert.equal(model.readCachedThread(mediaCache.threads, "media").conversation.messages.length, 1);
+assert.equal(model.conversationMatchesQuery({ messages: [imageMessage] }, ["invoice"]), true);
+assert.equal(model.conversationMatchesQuery({ messages: [{ blocks: [null, "bad", imageBlock] }] }, ["invoice"]), true);
+assert.equal(model.normalizeMessageBlocks([{ ...imageBlock, width: "bad", height: -1 }])[0].width, 0);
+assert.equal(model.normalizeMessageBlocks([{ ...imageBlock, url: "file:///etc/passwd" }]).length, 0);
+let mediaReads = model.updateLocalReadState({}, { id: "media", state: "open", messages: [imageMessage] }, false);
+assert.equal(model.messageUnread(mediaReads, "media", imageMessage), true);
+mediaReads = model.markConversationRead(mediaReads, "media");
+const refreshedImage = { ...imageMessage, blocks: [{ ...imageBlock, url: imageBlock.url.replace("old", "new") }] };
+assert.equal(model.messageUnread(mediaReads, "media", refreshedImage), false);
+assert.equal(model.localMessageKey({ ...imageMessage, id: "" }), model.localMessageKey({ ...refreshedImage, id: "" }));
+assert.notEqual(model.localMessageKey({ ...imageMessage, id: "" }), model.localMessageKey({ ...imageMessage, id: "", blocks: [{ ...imageBlock, url: "https://example.com/other.png" }] }));
+assert.equal(model.imageIdentity("https://example.com/image?id=1&X-Amz-Signature=abc&Expires=123#fragment"), "https://example.com/image?id=1");
+assert.notEqual(model.imageIdentity("https://example.com/image?id=1"), model.imageIdentity("https://example.com/image?id=2"));
+for (const url of ["file:///a.png", "qrc:/a.png", "data:image/png;base64,abc", "cid:mail", "javascript:alert(1)",
+  "https://", "https://user:pass@example.com/a.png", "https://example.com:bad/a", "https://example.com:99999/a", "https://example.com/\x00a", "https://example.com\\@evil.com/a"]) {
+  assert.equal(model.safeImageUrl(url), "", url);
+}
+assert.equal(model.autoLoadImage(imageBlock), true);
+assert.equal(model.autoLoadImage({ url: "https://downloads.intercom-attachments-7.com/a.png" }), true);
+for (const url of ["https://intercomcdn.com.evil.test/a", "https://evilintercomcdn.com/a", "https://example.com/a", "http://downloads.intercomcdn.com/a"]) {
+  assert.equal(model.autoLoadImage({ url }), false, url);
+}
+assert.equal(model.autoLoadImage({ ...imageBlock, width: 1, height: 1 }), false);
 
 // Highlighting a conversation marks all its messages read, but not other threads.
 let highlightedReads = model.updateLocalReadState({}, {

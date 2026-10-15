@@ -123,6 +123,28 @@ US, EU, and AU API hosts are tried automatically. The region that succeeds is ca
 - Inbox filters fetch every API page: all open conversations appear in Open,
   regardless of age or count. The API's 150-row page size is not a display limit.
 
+### Images
+
+The right-hand reader displays inline images and image attachments, including
+image-only messages. Previews fit within the message card without cropping;
+click a loaded preview to follow its link, or **Open original** to view the
+full-size image in your browser. Image filenames and alternative text are
+included in local search.
+
+HTTPS images on Intercom's image-hosting domains load automatically near the
+visible portion of the selected thread. Other hosts (and known 1×1 images)
+require a click to load, so opening an email does not automatically fetch its
+external tracking images. No API token is sent with image requests. Local-file,
+data, and unresolved email `cid:` sources are not loaded. Previews are static;
+uploading images and animated playback are not supported.
+
+Image URLs can expire. If a preview fails, refresh the conversation (`r`) to
+obtain current URLs or open the original. Metadata is stored with the existing
+conversation cache; offline image availability is not guaranteed. Existing
+text-only caches remain readable and gain images when refreshed. The next
+**Sync all conversations** also upgrades old closed archive records once,
+without downloading the image files themselves.
+
 ## Keybinding
 
 Omarchy does not ship a shortcut for this plugin. Add one in
@@ -165,3 +187,8 @@ The test suite requires Qt 6's `qmllint` and fails on lint warnings. Run
 Qt 5 is also installed. The lint setup resolves Omarchy's `qs.*` imports and
 supplies Quickshell's missing process-exit enum metadata in a temporary overlay,
 without modifying installed files or disabling checks.
+
+For a running reader, `omarchy-shell intercom-notifier images` reports image
+block counts, preview geometry, loading status, and viewport eligibility without
+including message text or signed image URLs. If a plugin reload retains old QML
+code, `omarchy restart shell` starts a fresh QML engine.

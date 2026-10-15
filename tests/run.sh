@@ -13,5 +13,6 @@ bash tests/lint.sh
 PYTHONDONTWRITEBYTECODE=1 python3 tests/lint.test.py
 
 bash tests/qml-smoke.sh
+PYTHONDONTWRITEBYTECODE=1 python3 tests/image-smoke.py
 
 printf 'all tests passed\n'

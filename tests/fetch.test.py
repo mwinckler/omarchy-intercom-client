@@ -199,6 +199,102 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(FETCH.identity_from_me(None), {})
         self.assertEqual(FETCH.identity_from_me({"id": "7"}), {"adminId": "7"})
 
+    def test_inline_images_preserve_order_and_balanced_formatting(self):
+        url = "https://downloads.intercomcdn.com/shot.png?signature=abc&expires=123"
+        body, blocks = FETCH.format_message_content(
+            '<p><b>Before <a href="https://example.com/full"><i>inside'
+            f'<img src="{url.replace("&", "&amp;")}" alt="Screenshot" width="800" height="600">'
+            'after</i></a> end</b></p>'
+        )
+        self.assertEqual([b["type"] for b in blocks], ["text", "image", "text"])
+        self.assertEqual(blocks[0]["text"], '<b>Before <a href="https://example.com/full"><i>inside</i></a></b>')
+        self.assertEqual(blocks[2]["text"], '<b><a href="https://example.com/full"><i>after</i></a> end</b>')
+        self.assertEqual(blocks[1]["url"], url)
+        self.assertEqual(blocks[1]["linkUrl"], "https://example.com/full")
+        self.assertEqual(blocks[1]["width"], 800)
+        self.assertNotIn("<img", body)
+
+    def test_image_attachments_merge_inline_metadata_without_duplicate_previews(self):
+        url = "https://example.com/image?signature=a&expires=1"
+        attachment = {"url": url, "name": "screenshot.png", "content_type": "image/png", "width": 500, "height": 300}
+        _, blocks = FETCH.format_message_content(f'<img src="{url}">', [
+            attachment, attachment, {"url": "https://example.com/file.pdf", "content_type": "application/pdf"},
+            {"url": "file:///etc/passwd", "content_type": "image/png"}, None,
+        ])
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["name"], "screenshot.png")
+        self.assertEqual(blocks[0]["width"], 500)
+        _, repeated = FETCH.format_message_content(f'<img src="{url}"><img src="{url}">', [attachment])
+        self.assertEqual(len(repeated), 2)  # Repetition in the message is intentional.
+        self.assertTrue(all(b["width"] == 500 for b in repeated))
+        _, intercom = FETCH.format_message_content(
+            '<img src="https://downloads.intercomcdn.com/i/o/workspace/upload/shot.png?signature=inline">',
+            [{**attachment, "url": "https://workspace.intercom-attachments-3.com/i/o/workspace/upload/shot.png?signature=attachment"}],
+        )
+        self.assertEqual(len(intercom), 1)
+        self.assertEqual(intercom[0]["name"], "screenshot.png")
+        self.assertEqual(intercom[0]["width"], 500)
+        _, unrelated = FETCH.format_message_content('<img src="https://example.com/shot.png">', [
+            {**attachment, "url": "https://other.example/shot.png"}
+        ])
+        self.assertEqual(len(unrelated), 2)
+        _, extension = FETCH.format_message_content("", [{"url": "https://example.com/shot.PNG?download=1"}])
+        self.assertEqual(extension[0]["type"], "image")
+
+    def test_image_only_source_replies_and_notes_are_retained(self):
+        attachment = {"url": "https://example.com/shot.png", "name": "screenshot.png", "content_type": "image/png"}
+        conv = {"id": "images", "created_at": 1,
+                "source": {"id": "src", "attachments": [attachment], "author": {"type": "user", "name": "Ada"}},
+                "conversation_parts": {"conversation_parts": [
+                    {"id": "reply", "part_type": "comment", "created_at": 2, "body": '<img src="https://example.com/reply.png"/>', "author": {"type": "admin"}},
+                    {"id": "note", "part_type": "note", "created_at": 3, "attachments": [attachment]},
+                    {"id": "system", "part_type": "assignment", "created_at": 4, "attachments": [attachment], "author": {"type": "bot"}},
+                ]}}
+        messages = FETCH.extract_messages(conv)
+        self.assertEqual([m["id"] for m in messages], ["src", "reply", "note"])
+        self.assertEqual([m["kind"] for m in messages], ["customer", "teammate", "note"])
+        self.assertEqual(messages[0]["body"], "Image: screenshot.png")
+        self.assertTrue(all(m["blocks"][0]["type"] == "image" for m in messages))
+        self.assertTrue(FETCH.conversation_identity(conv)[2].startswith("Image:"))
+        conv["conversation_parts"]["conversation_parts"] = []
+        self.assertEqual(FETCH.conversation_identity(conv), ("Ada", "", "Image: screenshot.png"))
+
+    def test_image_urls_and_malformed_metadata_are_safe(self):
+        for url in ["file:///etc/passwd", "qrc:/image.png", "data:image/png;base64,abc", "cid:mail-image",
+                    "javascript:alert(1)", "https://", "https://u:p@example.com/a.png", "https://example.com:bad/a.png",
+                    "https://example.com/\x00.png", "https://example.com\\@evil.com/a.png"]:
+            with self.subTest(url=url):
+                self.assertEqual(FETCH.image_url(url), "")
+        body, blocks = FETCH.format_message_content('<img src="cid:unknown" alt="Missing screenshot">')
+        self.assertIn("Missing screenshot", body)
+        self.assertEqual(blocks[0]["type"], "text")
+        _, blocks = FETCH.format_message_content('<img src="https://example.com/a.png" width="nan" height="-20">')
+        self.assertEqual((blocks[0]["width"], blocks[0]["height"]), (0, 0))
+
+    def test_image_message_identity_survives_signed_url_refresh(self):
+        def message(signature):
+            return FETCH.extract_messages({"conversation_parts": {"conversation_parts": [
+                {"part_type": "comment", "created_at": 1, "body": f'<img src="https://example.com/a.png?signature={signature}">'}
+            ]}})[0]
+        self.assertEqual(message("old")["id"], message("new")["id"])
+        self.assertEqual(FETCH.image_identity("https://example.com/image?id=1&X-Amz-Signature=abc&Expires=123#fragment"), "https://example.com/image?id=1")
+        self.assertNotEqual(FETCH.image_identity("https://example.com/image?id=1"), FETCH.image_identity("https://example.com/image?id=2"))
+
+    def test_archive_media_upgrade_and_filename_search(self):
+        FETCH.write_json_file(FETCH.archive_thread_path("legacy"), {"id": "legacy", "state": "closed"})
+        self.assertFalse(FETCH.archive_thread_stored("legacy"))
+        conv = {"id": "legacy", "state": "closed", "source": {"body": "See this", "attachments": [
+            {"url": "https://example.com/a.png", "name": "invoice-screenshot.png", "content_type": "image/png"}
+        ]}}
+        with patch.object(FETCH, "fetch_archive_thread", return_value=conv) as fetch:
+            self.assertEqual(FETCH.sync_search_page("token", "US", "ws", [conv], {}), (1, 1, 0, 0))
+            fetch.assert_called_once()
+        self.assertTrue(FETCH.archive_thread_stored("legacy"))
+        with patch.object(FETCH, "fetch_archive_thread") as fetch:
+            self.assertEqual(FETCH.sync_search_page("token", "US", "ws", [conv], {}), (1, 0, 1, 0))
+            fetch.assert_not_called()
+        self.assertEqual([r["id"] for r in FETCH.search_archive_local("invoice-screenshot")], ["legacy"])
+
     def test_normalize_and_sort(self):
         payload = {
             "total_count": 3,
@@ -1731,7 +1827,7 @@ class FetchTests(unittest.TestCase):
         os.environ["INTERCOM_ACCESS_TOKEN"] = "test-token"
         FETCH.write_json_file(
             FETCH.archive_thread_path("old-closed"),
-            {"id": "old-closed", "state": "closed", "messages": [{"body": "Stored"}]},
+            {"id": "old-closed", "state": "closed", "contentVersion": FETCH.CONTENT_VERSION, "messages": [{"body": "Stored"}]},
         )
         gets = []
         searches = []

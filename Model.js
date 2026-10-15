@@ -8,7 +8,13 @@ function objectValue(value) {
 }
 
 function arrayValue(value) {
-  return Array.isArray(value) ? value : []
+  if (Array.isArray(value)) return value
+  // Repeater modelData exposes nested arrays as Qt sequence objects. They
+  // support array methods, but Array.isArray() is false; copy them into JS.
+  if (value && typeof value === "object" && typeof value.length === "number"
+      && typeof value.slice === "function")
+    return Array.prototype.slice.call(value)
+  return []
 }
 
 function textValue(value, fallback) {
@@ -115,7 +121,7 @@ function normalizeMessage(value) {
   var kind = textValue(msg.kind, "customer").toLowerCase()
   if (kind !== "customer" && kind !== "teammate" && kind !== "note" && kind !== "bot")
     kind = "customer"
-  return {
+  var row = {
     id: textValue(msg.id),
     from: textValue(msg.from),
     email: textValue(msg.email),
@@ -123,6 +129,9 @@ function normalizeMessage(value) {
     createdAt: Math.max(0, Math.floor(numberValue(msg.createdAt, 0))),
     body: textValue(msg.body)
   }
+  var blocks = normalizeMessageBlocks(msg.blocks)
+  if (blocks.length > 0) row.blocks = blocks
+  return row
 }
 
 function normalizeMessages(value) {
@@ -130,7 +139,7 @@ function normalizeMessages(value) {
   var source = arrayValue(value)
   for (var i = 0; i < source.length; i++) {
     var row = normalizeMessage(source[i])
-    if (row.body !== "") messages.push(row)
+    if (row.body !== "" || arrayValue(row.blocks).length > 0) messages.push(row)
   }
   return messages
 }
@@ -215,6 +224,78 @@ function isSafeHttpUrl(value) {
   if (text === "") return false
   var lower = text.toLowerCase()
   return lower.indexOf("https://") === 0 || lower.indexOf("http://") === 0
+}
+
+function safeImageUrl(value) {
+  var url = textValue(value).trim()
+  if (/[\s\x00-\x1f\x7f\\]/.test(url)) return ""
+  var match = url.match(/^https?:\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?(?:[/?#].*)?$/i)
+  if (!match || (match[2] && Number(match[2]) > 65535)) return ""
+  return url
+}
+
+function autoLoadImage(value) {
+  var block = objectValue(value)
+  if (numberValue(block.width, 0) === 1 && numberValue(block.height, 0) === 1) return false
+  var match = safeImageUrl(block.url).match(/^https:\/\/([^/:?#]+)(?:[/?#]|$)/i)
+  if (!match) return false
+  // Exact domain boundaries, not substring matching. Other hosts require consent.
+  return /(^|\.)(intercomcdn\.com|intercomassets\.com|intercom-attachments-[1-9]\.com)$/i.test(match[1])
+}
+
+function imageIdentity(value) {
+  var url = textValue(value).split("#")[0]
+  var at = url.indexOf("?")
+  if (at < 0) return url
+  var parts = url.slice(at + 1).split("&")
+  var stable = []
+  for (var i = 0; i < parts.length; i++) {
+    var key = parts[i].split("=")[0]
+    try { key = decodeURIComponent(key) } catch (error) { /* Keep malformed keys verbatim. */ }
+    key = key.toLowerCase()
+    if (/^(signature|sig|expires|token|policy|key-pair-id|awsaccesskeyid)$/.test(key) || /^x-(amz|goog)-/.test(key)) continue
+    stable.push(parts[i])
+  }
+  return url.slice(0, at) + (stable.length > 0 ? "?" + stable.join("&") : "")
+}
+
+function normalizeMessageBlocks(value) {
+  var source = arrayValue(value)
+  var blocks = []
+  for (var i = 0; i < source.length; i++) {
+    var block = objectValue(source[i])
+    if (block.type === "text") {
+      // Images belong only in dedicated delegates, never in Qt's HTML renderer.
+      var text = textValue(block.text).replace(/<img\b[^>]*>/gi, "")
+      if (text.trim() !== "") blocks.push({ type: "text", text: text })
+    } else if (block.type === "image") {
+      var url = safeImageUrl(block.url)
+      if (url === "") continue
+      blocks.push({
+        type: "image", url: url,
+        name: textValue(block.name), alt: textValue(block.alt, "Image"),
+        width: Math.max(0, Math.min(32768, Math.floor(numberValue(block.width, 0)))),
+        height: Math.max(0, Math.min(32768, Math.floor(numberValue(block.height, 0)))),
+        linkUrl: safeImageUrl(block.linkUrl) || url
+      })
+    }
+  }
+  return blocks
+}
+
+function messageBlocks(value) {
+  var msg = objectValue(value)
+  var blocks = normalizeMessageBlocks(msg.blocks)
+  if (blocks.length === 0) blocks = [{ type: "text", text: textValue(msg.body).replace(/<img\b[^>]*>/gi, "") }]
+  var out = []
+  for (var i = 0; i < blocks.length; i++) {
+    if (blocks[i].type === "image") out.push(blocks[i])
+    else {
+      var paragraphs = messageParagraphs(blocks[i].text)
+      for (var j = 0; j < paragraphs.length; j++) out.push({ type: "text", text: paragraphs[j] })
+    }
+  }
+  return out
 }
 
 function isWordChar(value) {
@@ -739,6 +820,11 @@ function conversationHaystack(value) {
   for (var i = 0; i < messages.length; i++) {
     var msg = objectValue(messages[i])
     parts.push(msg.body, msg.from, msg.email)
+    var blocks = arrayValue(msg.blocks)
+    for (var b = 0; b < blocks.length; b++) {
+      var block = objectValue(blocks[b])
+      if (block.type === "image") parts.push(block.name, block.alt)
+    }
   }
   return parts.join("\n").toLowerCase()
 }
@@ -1203,7 +1289,12 @@ function normalizeLocalReadState(value) {
 
 function localMessageKey(value) {
   var msg = normalizeMessage(value)
-  return "$" + (msg.id || JSON.stringify([msg.createdAt, msg.kind, msg.from, msg.body]))
+  var identity = [msg.createdAt, msg.kind, msg.from, msg.body]
+  var images = arrayValue(msg.blocks).filter(function(block) { return block.type === "image" })
+  if (images.length > 0) identity.push(images.map(function(block) {
+    return [imageIdentity(block.url), block.name]
+  }))
+  return "$" + (msg.id || JSON.stringify(identity))
 }
 
 function messageUnread(value, conversationId, message) {

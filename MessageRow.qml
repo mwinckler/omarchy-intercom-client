@@ -21,6 +21,8 @@ BorderSurface {
   property string fontFamily: root.themeFont.family
   property string timeLabel: ""
   property bool pointerHovered: hoverHandler.hovered
+  property bool imagesEnabled: false
+  property Flickable imageViewport: null
 
   signal activated()
   signal linkActivated(string url)
@@ -34,6 +36,23 @@ BorderSurface {
   property string badge: note ? "NOTE" : ""
 
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
+
+  function imageDiagnostics() {
+    var images = []
+    for (var i = 0; i < blockRepeater.count; i++) {
+      var loader = blockRepeater.itemAt(i) as Loader
+      var preview = loader ? loader.item as MessageImage : null
+      if (!preview) continue
+      images.push({
+        width: preview.width, height: preview.height,
+        slotWidth: loader.width, slotHeight: loader.height,
+        enabled: preview.imagesEnabled, nearViewport: preview.nearViewport,
+        requested: preview.requested, automatic: preview.automatic,
+        status: preview.imageStatus
+      })
+    }
+    return images
+  }
 
   implicitHeight: inner.implicitHeight + Style.space(16)
   color: draft ? alpha(draftColor, selected || pointerHovered ? 0.28 : 0.18)
@@ -88,7 +107,15 @@ BorderSurface {
 
   TapHandler {
     acceptedButtons: Qt.LeftButton
-    onTapped: root.activated()
+    onTapped: function(point) {
+      for (var i = 0; i < blockRepeater.count; i++) {
+        var item = blockRepeater.itemAt(i) as Loader
+        if (!item || !(item.item instanceof MessageImage)) continue
+        var p = root.mapToItem(item, point.position.x, point.position.y)
+        if (p.x >= 0 && p.y >= 0 && p.x < item.width && p.y < item.height) return
+      }
+      root.activated()
+    }
   }
 
   ColumnLayout {
@@ -158,31 +185,54 @@ BorderSurface {
     ColumnLayout {
       Layout.fillWidth: true
       spacing: 0
-      visible: paragraphRepeater.count > 0
+      visible: blockRepeater.count > 0
 
       Repeater {
-        id: paragraphRepeater
-        model: Model.messageParagraphs(root.message.body)
+        id: blockRepeater
+        model: Model.messageBlocks(root.message)
 
-        Text {
+        Loader {
+          id: blockLoader
           required property var modelData
           required property int index
           Layout.fillWidth: true
-          topPadding: index > 0 ? Style.space(12) : 0
-          text: String(modelData || "")
-          color: root.note || root.bot ? root.dim : root.foreground
-          linkColor: root.accent
-          font.family: root.fontFamily
-          font.pixelSize: root.themeFont.bodySmall
-          font.italic: root.note
-          wrapMode: Text.WordWrap
-          textFormat: Text.StyledText
-          onLinkActivated: function(link) { root.linkActivated(link) }
+          Layout.topMargin: index > 0 ? Style.space(12) : 0
+          sourceComponent: modelData.type === "image" ? imageComponent : textComponent
 
-          MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.NoButton
-            cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor
+          Component {
+            id: imageComponent
+            MessageImage {
+              image: blockLoader.modelData
+              imagesEnabled: root.imagesEnabled
+              viewport: root.imageViewport
+              messageRow: root
+              messageTop: root.y
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onLinkActivated: function(url) { root.linkActivated(url) }
+            }
+          }
+
+          Component {
+            id: textComponent
+            Text {
+              text: String(blockLoader.modelData.text || "")
+              color: root.note || root.bot ? root.dim : root.foreground
+              linkColor: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: root.themeFont.bodySmall
+              font.italic: root.note
+              wrapMode: Text.WordWrap
+              textFormat: Text.StyledText
+              onLinkActivated: function(link) { root.linkActivated(link) }
+
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor
+              }
+            }
           }
         }
       }
