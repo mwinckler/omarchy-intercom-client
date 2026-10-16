@@ -27,6 +27,7 @@ Item {
   property bool replying: false
   property bool downloadingAttachment: false
   property string attachmentMessage: ""
+  property string attachmentMessageConversationId: ""
   property bool closing: false
   property bool reopening: false
   property string replyMessage: ""
@@ -986,12 +987,22 @@ Item {
     openUrl(inboxUrl)
   }
 
-  function downloadAttachment(attachment, destination) {
+  function setAttachmentMessage(text, conversationId) {
+    attachmentMessageConversationId = String(conversationId || "")
+    attachmentMessage = String(text || "")
+  }
+
+  function clearAttachmentMessage() {
+    setAttachmentMessage("", "")
+  }
+
+  function downloadAttachment(attachment, destination, conversationId) {
     if (downloadProcess.running) return
     var url = Model.safeImageUrl((attachment || {}).url)
     if (url === "") return
     downloadingAttachment = true
-    attachmentMessage = "Downloading attachment…"
+    _downloadConversationId = String(conversationId || threadId || "")
+    setAttachmentMessage("Downloading attachment…", _downloadConversationId)
     _downloadSecret = JSON.stringify({ url: url, path: String(destination || "") })
     downloadProcess.command = [root.pluginRoot + "/intercom-fetch", "--download-attachment"]
     downloadProcess.running = true
@@ -1093,6 +1104,7 @@ Item {
     initialReadBefore = 0
     barUrgent = false
     replyMessage = ""
+    clearAttachmentMessage()
     closing = false
     reopening = false
     syncing = false
@@ -1518,6 +1530,7 @@ Item {
   property string _replySecret: ""
   property string _replyConversationId: ""
   property string _downloadSecret: ""
+  property string _downloadConversationId: ""
   property string _sendingScheduledId: ""
   property string _closeStdout: ""
   property string _closeStderr: ""
@@ -1728,9 +1741,11 @@ Item {
       downloadWatchdog.stop()
       root.downloadingAttachment = false
       var parsed = Model.parseFetch(downloadStdout.text)
-      root.attachmentMessage = parsed.state === "saved" || parsed.state === "error"
+      var message = parsed.state === "saved" || parsed.state === "error"
         ? parsed.message : "Could not download attachment. Try again."
-      if (exitCode !== 0) root.attachmentMessage = "Attachment download was interrupted. Try again."
+      if (exitCode !== 0) message = "Attachment download was interrupted. Try again."
+      root.setAttachmentMessage(message, root._downloadConversationId)
+      root._downloadConversationId = ""
     }
   }
 

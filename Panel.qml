@@ -37,6 +37,9 @@ Panel {
   property bool replyAsNote: false
   property var replyAttachments: []
   property var pendingDownloadAttachment: ({})
+  property string pendingDownloadConversationId: ""
+  readonly property bool attachmentStatusVisible: intercom.attachmentMessage !== ""
+    && intercom.attachmentMessageConversationId === expandConversationId
   property string attachmentConversationId: ""
   readonly property FilePicker uploadDialog: uploadPicker
   readonly property FilePicker saveAttachmentDialog: savePicker
@@ -66,6 +69,7 @@ Panel {
   onExpandConversationIdChanged: {
     threadFocusKey = ""
     threadFocusIndex = -1
+    intercom.clearAttachmentMessage()
     root.closeConfirmDialog()
     root.syncThreadFocus(pane === "thread")
   }
@@ -1275,6 +1279,7 @@ Panel {
   function chooseAttachments() {
     if (!root.composing || intercom.replying || root.fileDialogOpen || !uploadDialog) return
     root.saveComposerDraft()
+    intercom.replyMessage = ""
     attachmentConversationId = replyConversationId
     uploadDialog.open()
   }
@@ -1294,7 +1299,9 @@ Panel {
 
   function chooseAttachmentDestination(attachment) {
     if (intercom.downloadingAttachment || root.fileDialogOpen || !saveAttachmentDialog) return
+    intercom.clearAttachmentMessage()
     pendingDownloadAttachment = attachment
+    pendingDownloadConversationId = expandConversationId
     var folder = StandardPaths.writableLocation(StandardPaths.DownloadLocation)
     var name = Model.downloadAttachmentName(attachment)
     saveAttachmentDialog.currentFolder = folder
@@ -1436,6 +1443,7 @@ Panel {
       })
     } else {
       compositorFocusLost = false
+      intercom.clearAttachmentMessage()
       if (uploadDialog && uploadDialog.visible) uploadDialog.close()
       if (saveAttachmentDialog && saveAttachmentDialog.visible) saveAttachmentDialog.close()
       intercom.stopPrefetch()
@@ -1463,17 +1471,20 @@ Panel {
     pluginRoot: intercom.pluginRoot
     mode: "save"
     onSelected: function(files) {
-      intercom.downloadAttachment(root.pendingDownloadAttachment, files[0])
+      intercom.downloadAttachment(root.pendingDownloadAttachment, files[0], root.pendingDownloadConversationId)
       root.pendingDownloadAttachment = ({})
+      root.pendingDownloadConversationId = ""
       root.restoreDialogFocus()
     }
     onRejected: {
       root.pendingDownloadAttachment = ({})
+      root.pendingDownloadConversationId = ""
       root.restoreDialogFocus()
     }
     onFailed: function(message) {
+      intercom.setAttachmentMessage(message, root.pendingDownloadConversationId)
       root.pendingDownloadAttachment = ({})
-      intercom.attachmentMessage = message
+      root.pendingDownloadConversationId = ""
       root.restoreDialogFocus()
     }
   }
@@ -1637,7 +1648,8 @@ Panel {
     }
     function status(): string {
       return JSON.stringify({
-        implementationVersion: 4,
+        implementationVersion: 5,
+        attachmentStatusVisible: root.attachmentStatusVisible,
         state: intercom.state,
         waitingCount: intercom.waitingCount,
         openCount: intercom.openCount,
@@ -2770,7 +2782,7 @@ Panel {
               }
             }
 
-            Text {
+            Row {
               id: attachmentStatus
               anchors.left: parent.left
               anchors.right: parent.right
@@ -2778,13 +2790,30 @@ Panel {
               anchors.leftMargin: Style.space(8)
               anchors.rightMargin: Style.space(8)
               height: visible ? implicitHeight : 0
-              visible: intercom.attachmentMessage !== ""
-              text: intercom.attachmentMessage
-              textFormat: Text.PlainText
-              color: root.accent
-              font.family: root.fontFamily
-              font.pixelSize: root.themeFont.caption
-              wrapMode: Text.WrapAnywhere
+              visible: root.attachmentStatusVisible
+              spacing: Style.space(6)
+
+              Text {
+                width: Math.max(0, parent.width - (dismissAttachmentStatusButton.visible
+                  ? dismissAttachmentStatusButton.implicitWidth + parent.spacing : 0))
+                text: intercom.attachmentMessage
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: root.themeFont.caption
+                wrapMode: Text.WrapAnywhere
+              }
+
+              Button {
+                id: dismissAttachmentStatusButton
+                text: "Dismiss"
+                visible: !intercom.downloadingAttachment
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                fontSize: root.themeFont.caption
+                onClicked: intercom.clearAttachmentMessage()
+              }
             }
 
             Column {

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import io
 import json
 import signal
 import unittest
+from contextlib import redirect_stderr
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -117,13 +119,33 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(self.run_picker({})["files"], ["file:///right"])
 
     def test_portal_errors_and_invalid_results_are_reported(self):
-        self.assertEqual(PICKER.selection(2, {}, "open")["state"], "error")
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(PICKER.selection(2, {}, "open")["state"], "error")
         for uris in ([], "file:///one", ["https://example.com/file"], ["file://remote/etc/passwd"],
                      ["file:///bad%00name"], ["/relative", None], ["file:///a"] * 11):
             with self.subTest(uris=uris), self.assertRaises(ValueError):
                 PICKER.selection(0, {"uris": uris}, "open")
         with self.assertRaises(ValueError):
             PICKER.selection(0, {"uris": ["file:///one", "file:///two"]}, "save")
+
+    def test_picker_failure_explains_the_operation_and_logs_portal_response(self):
+        for mode in ("open", "save"):
+            with self.subTest(mode=mode), redirect_stderr(io.StringIO()) as log:
+                result = PICKER.selection(2, {}, mode)
+                self.assertEqual(result["state"], "error")
+                self.assertIn("Try again", result["message"])
+                self.assertIn(f"portal {mode} request ended with response 2", log.getvalue())
+                if mode == "save":
+                    self.assertIn("No attachment was downloaded", result["message"])
+                    self.assertNotIn("draft", result["message"])
+                else:
+                    self.assertIn("Your draft has been kept", result["message"])
+
+    def test_cancellation_is_silent_in_both_modes(self):
+        for mode in ("open", "save"):
+            with self.subTest(mode=mode), redirect_stderr(io.StringIO()) as log:
+                self.assertEqual(PICKER.selection(1, {}, mode), {"state": "cancelled"})
+                self.assertEqual(log.getvalue(), "")
 
     def test_invalid_options_never_open_portal(self):
         for request in ({"mode": "bad"}, {"mode": "save", "name": "../escape"}, {"mode": "save", "name": ".."},

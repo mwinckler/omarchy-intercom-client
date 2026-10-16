@@ -42,7 +42,9 @@ Item {
     if (exitCode === 0 && result.state === "cancelled") root.rejected()
     else if (exitCode === 0 && result.state === "selected" && Array.isArray(result.files) && result.files.length)
       root.selected(result.files)
-    else root.failed(String(result.message || "The system file picker failed. Your draft has been kept. Try again."))
+    else root.failed(String(result.message || (mode === "save"
+      ? "The system file picker failed. No attachment was downloaded. Try again."
+      : "The system file picker failed. Your draft has been kept. Try again.")))
   }
 
   Process {

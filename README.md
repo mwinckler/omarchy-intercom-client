@@ -253,6 +253,9 @@ to open a picker keeps the draft and selected attachments intact.
 
 Closing the panel also cancels its picker; it does not leave a dialog running
 in the background. See [Requirements](#requirements) for portal dependencies.
+Download status and picker errors are shown only in the originating conversation.
+Use **Dismiss** to clear them; retrying, switching conversations, or closing the
+panel also clears the previous status. Save-picker errors do not affect drafts.
 
 Attachment names are included in local search. Cached conversations gain file
 attachments when refreshed; **Sync all conversations** upgrades older archive

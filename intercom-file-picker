@@ -31,7 +31,9 @@ def selection(response, results, mode):
     if response == 1:
         return {"state": "cancelled"}
     if response != 0:
-        return {"state": "error", "message": "The system file picker failed. Your draft has been kept."}
+        print(f"intercom-file-picker: portal {mode} request ended with response {response}", file=sys.stderr, flush=True)
+        kept = "No attachment was downloaded." if mode == "save" else "Your draft has been kept."
+        return {"state": "error", "message": f"The system file picker failed. {kept} Try again."}
     files = results.get("uris", [])
     if not isinstance(files, (list, tuple)) or not files:
         raise ValueError("The system file picker returned no files.")
@@ -124,6 +126,7 @@ def pick(request, Gio, GLib, GLibUnix):
 
 
 def main():
+    request = {}
     try:
         from gi.repository import Gio, GLib, GLibUnix
     except ImportError:
@@ -134,8 +137,10 @@ def main():
             if not isinstance(request, dict):
                 raise ValueError("Invalid file picker request.")
             result = pick(request, Gio, GLib, GLibUnix)
-        except (ValueError, GLib.Error, OSError):
-            result = {"state": "error", "message": "Could not open the system file picker. Check that your desktop portal is running. Your draft has been kept."}
+        except (ValueError, GLib.Error, OSError) as error:
+            print(f"intercom-file-picker: {error}", file=sys.stderr, flush=True)
+            kept = "No attachment was downloaded." if isinstance(request, dict) and request.get("mode") == "save" else "Your draft has been kept."
+            result = {"state": "error", "message": f"Could not open the system file picker. Check that your desktop portal is running. {kept}"}
     print(json.dumps(result), flush=True)
 
 

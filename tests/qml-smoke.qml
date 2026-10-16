@@ -579,6 +579,60 @@ ShellRoot {
         }
         widget.chooseAttachmentDestination({ name: "file.pdf", url: "https://example.com/file" })
       } else if (stage === 10) {
+        // An empty/malformed helper response uses a save-specific fallback.
+        shell.pickerResponse(widget.saveAttachmentDialog, {})
+      } else if (stage === 11) {
+        if (!widget.attachmentStatusVisible || shell.probeService.attachmentMessage.indexOf("No attachment was downloaded") < 0
+            || shell.probeService.attachmentMessage.indexOf("draft") >= 0
+            || shell.probeService.attachmentMessageConversationId !== "picker-smoke"
+            || widget.pendingDownloadConversationId !== "" || widget.replyAttachments.length !== 2) {
+          shell.failDialogProbe("save picker failure had incorrect context or changed the draft")
+          return
+        }
+        widget.chooseAttachmentDestination({ name: "file.pdf", url: "https://example.com/file" })
+        if (widget.attachmentStatusVisible || shell.probeService.attachmentMessage !== "") {
+          shell.failDialogProbe("retrying save picker retained the old failure")
+          return
+        }
+      } else if (stage === 12) {
+        shell.pickerResponse(widget.saveAttachmentDialog, { state: "cancelled" })
+      } else if (stage === 13) {
+        if (widget.attachmentStatusVisible || widget.pendingDownloadConversationId !== "") {
+          shell.failDialogProbe("canceling save picker retained an error or pending conversation")
+          return
+        }
+        shell.probeService.setAttachmentMessage("Download failed", "picker-smoke")
+        if (!widget.attachmentStatusVisible) {
+          shell.failDialogProbe("download failure was hidden from its conversation")
+          return
+        }
+        widget.expandConversationId = "other"
+        if (widget.attachmentStatusVisible || shell.probeService.attachmentMessage !== "") {
+          shell.failDialogProbe("changing conversations retained an attachment failure")
+          return
+        }
+        // A late background download result must not appear in another thread.
+        shell.probeService.setAttachmentMessage("Download finished", "picker-smoke")
+        if (widget.attachmentStatusVisible) {
+          shell.failDialogProbe("background download status leaked into another conversation")
+          return
+        }
+        shell.probeService.setAttachmentMessage("Download failed", "other")
+        shell.probeService.clearAttachmentMessage()
+        if (widget.attachmentStatusVisible || shell.probeService.attachmentMessage !== "") {
+          shell.failDialogProbe("dismissing download status retained the message")
+          return
+        }
+        shell.probeService.setAttachmentMessage("Download failed", "other")
+        widget.close()
+        if (shell.probeService.attachmentMessage !== "") {
+          shell.failDialogProbe("closing panel retained an attachment failure")
+          return
+        }
+        widget.open()
+        shell.openAttachmentComposer()
+        widget.chooseAttachmentDestination({ name: "file.pdf", url: "https://example.com/file" })
+      } else if (stage === 14) {
         widget.close()
       } else {
         if (widget.fileDialogOpen || widget.opened) {
