@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Capture detached toast commands without touching the desktop notifier."""
+
+import json
+import os
+import sys
+
+with open(os.environ["INTERCOM_SMOKE_NOTIFICATIONS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")

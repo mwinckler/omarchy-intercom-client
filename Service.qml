@@ -247,8 +247,8 @@ Item {
     conversations = parsed.conversations
     if (state === "ready" && waitingCount === 0)
       message = "No conversations are waiting for a reply."
-    seedThreadCache(parsed.conversations)
-    notifyNewMessages(parsed)
+    seedThreadCache(parsed.conversations, true)
+    refreshNewWaitingThreads(parsed)
     if (!inboxLoaded && !openLoading)
       loadInbox()
     if (!initialReadSeeded && Model.inboxFetchFilter(inboxFilter) !== "open")
@@ -263,7 +263,7 @@ Item {
       message = String(row.message)
   }
 
-  function notifyNewMessages(parsed) {
+  function refreshNewWaitingThreads(parsed) {
     var row = parsed || {}
     if (row.state !== "ready") return
     var current = row.conversations
@@ -273,7 +273,6 @@ Item {
       return
     }
     var news = Model.newMessageConversations(seenConversations, current)
-    var toNotify = Model.notificationsToSend(seenConversations, current, Model.notificationLimit())
     seenConversations = Model.conversationIndex(current)
     if (news.length) {
       threadCache = Model.expireCachedThreads(threadCache, news)
@@ -285,8 +284,6 @@ Item {
       prefetchThreads(news, currentId, true)
       root.newWaitingMessages(news)
     }
-    for (var i = 0; i < toNotify.length; i++)
-      sendMessageNotification(toNotify[i])
   }
 
   function sendMessageNotification(conversation) {
@@ -358,9 +355,15 @@ Item {
     savePrefs()
   }
 
-  function observeMessages(conversation, read) {
+  function observeMessages(conversation, read, notify) {
     var id = String((conversation || {}).id || "")
     var previous = (localReadState || {})[id] || {}
+    var notifications = []
+    if (notify && !read && initialReadSeeded) {
+      var cached = cachedThread(id)
+      notifications = Model.newReplyNotifications(localReadState, conversation, adminEmail, initialReadBefore,
+        cached ? cached.conversation : null)
+    }
     // The first complete Open inbox establishes the baseline, not an unread backlog.
     var next = Model.updateLocalReadState(
       localReadState, conversation, !!read || !initialReadSeeded, adminEmail, initialReadBefore
@@ -374,6 +377,10 @@ Item {
     pendingUrgent = Model.localUnreadConversations(localReadState)
     refreshBarUrgent()
     schedulePersistCache()
+    // Commit message identities before dispatch, so inbox/thread responses and
+    // focused-panel acknowledgements cannot produce duplicate notifications.
+    for (var i = 0; i < notifications.length; i++)
+      sendMessageNotification(notifications[i])
     return hasNew
   }
 
@@ -736,7 +743,7 @@ Item {
       pendingUrgent = Model.localUnreadConversations(localReadState)
       refreshBarUrgent()
     }
-    seedThreadCache(merged)
+    seedThreadCache(merged, true)
     if (source === "open" && !initialReadSeeded) {
       initialReadBefore = Math.floor(Date.now() / 1000)
       initialReadSeeded = true
@@ -760,7 +767,7 @@ Item {
     return Model.readCachedThread(threadCache, conversationId)
   }
 
-  function seedThreadCache(conversations) {
+  function seedThreadCache(conversations, notify) {
     var list = withoutSpam(conversations)
     var now = Date.now()
     var cache = threadCache
@@ -770,7 +777,7 @@ Item {
     for (var i = 0; i < list.length; i++) {
       var conv = list[i] || {}
       if (String(conv.id || "") === "") continue
-      var hasNew = observeMessages(conv, false)
+      var hasNew = observeMessages(conv, false, notify)
       var existing = Model.readCachedThread(cache, conv.id)
       if (existing && String(conv.state || "") !== "" && existing.conversation.state !== conv.state) {
         existing.conversation.state = conv.state
@@ -896,7 +903,7 @@ Item {
     }
     var convId = String(conv.id || "")
     if (!failed && convId !== "") {
-      observeMessages(conv, false)
+      observeMessages(conv, false, true)
       threadCache = Model.writeCachedThread(threadCache, conv, Date.now())
       schedulePersistCache()
       fetchedId = convId
@@ -1011,7 +1018,7 @@ Item {
     var existing = convId !== "" ? cachedThread(convId) : null
     var stale = Model.prefetchResultStale(existing, prefetchStartedAt)
     if (!failed && convId !== "" && !stale) {
-      observeMessages(conv, false)
+      observeMessages(conv, false, true)
       threadCache = Model.writeCachedThread(threadCache, conv, Date.now())
       schedulePersistCache()
       fetchedId = convId

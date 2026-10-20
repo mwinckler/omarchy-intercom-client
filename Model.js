@@ -1576,19 +1576,64 @@ function newMessageConversations(previous, conversations) {
   return rows
 }
 
-function notificationLimit() {
-  return 5
-}
-
 function notificationPreviewLimit() {
   return 120
 }
 
-function notificationsToSend(previous, conversations, limit) {
-  var rows = newMessageConversations(previous, conversations)
-  var cap = Math.max(0, Math.floor(numberValue(limit, notificationLimit())))
-  if (cap <= 0 || rows.length <= cap) return rows
-  return rows.slice(rows.length - cap)
+function newReplyNotifications(readState, conversation, ownEmail, initialReadBefore, cachedConversation) {
+  var conv = normalizeConversation(conversation)
+  if (!isSafeConversationId(conv.id) || !conversationIsOpen(conv)) return []
+  var known = objectValue(objectValue(readState)[conv.id])
+  var before = numberValue(initialReadBefore, 0)
+  // A full thread can reveal older history missing from the inbox preview.
+  // Compare with known messages, not updatedAt (which also changes for actions).
+  var cached = normalizeConversation(cachedConversation)
+  var history = conv.messages.concat(cached.messages)
+  for (var i = 0; i < history.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(known, localMessageKey(history[i])))
+      before = Math.max(before, history[i].createdAt)
+  }
+  var email = textValue(ownEmail).trim().toLowerCase()
+  var notifications = []
+  var seen = {}
+  for (var j = 0; j < conv.messages.length; j++) {
+    var msg = conv.messages[j]
+    var key = localMessageKey(msg)
+    if (seen[key] || Object.prototype.hasOwnProperty.call(known, key)) continue
+    seen[key] = true
+    if (msg.kind !== "customer" && msg.kind !== "teammate") continue
+    if (msg.kind === "teammate" && email !== "" && msg.email.trim().toLowerCase() === email) continue
+    if (msg.createdAt > 0 && msg.createdAt < before) continue
+    notifications.push({
+      id: conv.id,
+      from: msg.from || msg.email || conv.from || conv.email,
+      snippet: notificationMessageText(msg),
+      title: conv.title
+    })
+  }
+  return notifications
+}
+
+function notificationMessageText(message) {
+  var msg = normalizeMessage(message)
+  var text = msg.body.replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(?:p|div|li|tr|h[1-6])\s*>/gi, " ").replace(/<[^>]*>/g, "")
+    .replace(/&(?:amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-f]+);/gi, function(entity) {
+      var named = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&nbsp;": " " }
+      var lower = entity.toLowerCase()
+      if (Object.prototype.hasOwnProperty.call(named, lower)) return named[lower]
+      var hex = lower.charAt(2) === "x"
+      var code = parseInt(lower.slice(hex ? 3 : 2, -1), hex ? 16 : 10)
+      return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        ? String.fromCodePoint(code) : ""
+    }).replace(/\s+/g, " ").trim()
+  if (text !== "") return text
+  var blocks = arrayValue(msg.blocks)
+  for (var i = 0; i < blocks.length; i++) {
+    if (blocks[i].type === "image") return "Image: " + (blocks[i].name || blocks[i].alt || "attachment")
+    if (blocks[i].type === "attachment") return "Attachment: " + (blocks[i].name || "file")
+  }
+  return "New reply"
 }
 
 function truncateText(value, limit) {
@@ -1597,7 +1642,10 @@ function truncateText(value, limit) {
   if (cap <= 0) return ""
   if (text.length <= cap) return text
   if (cap === 1) return "…"
-  return text.slice(0, cap - 1).replace(/\s+$/, "") + "…"
+  var end = cap - 1
+  // Do not cut an emoji's UTF-16 surrogate pair in half.
+  if (/[\ud800-\udbff]/.test(text.charAt(end - 1))) end -= 1
+  return text.slice(0, end).replace(/\s+$/, "") + "…"
 }
 
 function notifySendText(value, fallback) {
@@ -1616,17 +1664,14 @@ function notificationHeadline(conv) {
 function notificationBody(conv) {
   var row = objectValue(conv)
   var body = notifySendText(row.snippet, row.title)
-  return truncateText(body, notificationPreviewLimit())
-}
-
-function shellQuote(value) {
-  return "'" + textValue(value).replace(/'/g, "'\\''") + "'"
+  // The system notifier supports body markup; keep reply content literal.
+  return escapeStyled(truncateText(body, notificationPreviewLimit()))
 }
 
 function notificationExec(conv) {
   var id = conversationId(conv)
-  if (id === "") return "omarchy-shell omarchy-intercom-client open"
-  return "omarchy-shell omarchy-intercom-client conversation " + shellQuote(id)
+  if (id === "") return ["omarchy-shell", "omarchy-intercom-client", "open"]
+  return ["omarchy-shell", "omarchy-intercom-client", "conversation", id]
 }
 
 function notificationCommand(conv) {
@@ -1635,12 +1680,12 @@ function notificationCommand(conv) {
     "--app-name", "Intercom",
     "-u", "normal",
     "-g", GLYPH,
-    "--exec", notificationExec(conv),
     notificationHeadline(conv)
   ]
   var body = notificationBody(conv)
   if (body !== "") command.push(body)
-  return command
+  // --exec consumes all remaining arguments; headline/body must precede it.
+  return command.concat(["--exec"], notificationExec(conv))
 }
 
 function queuedThreadAfterInFlight(loadingId, queuedId, queuedForce, requestedId, force) {

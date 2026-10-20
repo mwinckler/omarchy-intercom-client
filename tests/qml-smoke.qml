@@ -127,6 +127,56 @@ ShellRoot {
     return true
   }
 
+  function probeNotifications(service) {
+    service.clearSession()
+    service.workspaceId = "smoke"
+    service.state = "ready"
+    widget.expandConversationId = ""
+    var now = Math.floor(Date.now() / 1000)
+    var conversation = { id: "toast-smoke", state: "open", waitingSince: now - 10, messages: [
+      { id: "baseline", from: "Toaster sender", createdAt: now - 10, body: "Existing backlog stays quiet" }
+    ] }
+    service._inboxRequested = "open"
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [conversation] }), 0)
+    service.openLoading = false
+    if (!service.initialReadSeeded) return false
+    conversation.messages.push(
+      { id: "first", from: "Toaster sender", createdAt: now, body: "First incoming reply " + "x".repeat(180) },
+      { id: "second", from: "Toaster sender", createdAt: now + 1, body: "Another reply with the same waiting timestamp" },
+      { id: "mine", from: "Toaster sender", kind: "teammate", email: "me@example.com", createdAt: now + 1, body: "Own send stays quiet" },
+      { id: "note", from: "Toaster sender", kind: "note", createdAt: now + 1, body: "Notes stay quiet" },
+      { id: "bot", from: "Toaster sender", kind: "bot", createdAt: now + 1, body: "Bots stay quiet" },
+      { id: "teammate", from: "Toaster sender", kind: "teammate", email: "other@example.com", createdAt: now + 1, body: "Another teammate's reply" }
+    )
+    var output = JSON.stringify({ state: "ready", adminEmail: "me@example.com", conversations: [conversation] })
+    service.applyOutput(output, 0)
+    service.applyOutput(output, 0)
+    service._inboxRequested = "open"
+    service.applyInbox(output, 0)
+    service.openLoading = false
+    conversation.messages.push({ id: "reader", from: "Toaster sender", createdAt: now + 2, body: "Reply discovered by the reader" })
+    service.loadingThreadId = conversation.id
+    service.applyThread(JSON.stringify({ state: "ready", conversation: conversation }), 0)
+    conversation.messages.push({ id: "prefetch", from: "Toaster sender", createdAt: now + 3, body: "Reply discovered by prefetch" })
+    service.prefetchingId = conversation.id
+    service.prefetchStartedAt = Date.now() + 1
+    service.applyPrefetch(JSON.stringify({ state: "ready", conversation: conversation }), 0)
+    // History can be newer than the startup baseline yet older than the most
+    // recent known reply; expanding it must not toast or re-notify old parts.
+    conversation.messages.unshift({ id: "history", from: "Toaster sender", createdAt: now + 1, body: "Older thread history stays quiet" })
+    service.loadingThreadId = conversation.id
+    service.applyThread(JSON.stringify({ state: "ready", conversation: conversation }), 0)
+    service.showThread(conversation)
+    service.restoreDiskCache(Model.parseDiskCache(Model.serializeDiskCache(service.cacheSnapshot())))
+    service.applyOutput(output, 0)
+    service.clearSession()
+    service.workspaceId = "smoke"
+    service.state = "ready"
+    service.initialReadSeeded = true
+    service.inboxLoadedSource = "open"
+    return true
+  }
+
   function openAttachmentComposer() {
     var conversation = { id: "picker-smoke", state: "open", messages: [] }
     probeService.state = "ready"
@@ -447,6 +497,10 @@ ShellRoot {
         console.error("intercom qml smoke failed: first inbox loading exposed previews or lost confirmed conversations")
         widget.close()
         Qt.quit()
+        return
+      }
+      if (!shell.probeNotifications(service)) {
+        shell.failDialogProbe("reply notification baseline failed")
         return
       }
       if (!shell.probeSpam(service)) {

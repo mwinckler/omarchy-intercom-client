@@ -243,12 +243,15 @@ snoozed conversations are treated as read, and your own replies/notes are exclud
 Cached unread conversations missing from the latest inbox response remain
 reachable at the top of their matching filter.
 
-Desktop notifications show the sender and a preview; clicking one opens that
-conversation in the widget. They are based on newly waiting conversations or an
-increase in Intercom's `waiting_since` timestamp, with at most five notifications
-per refresh. A follow-up that does not advance that timestamp may become unread
-without producing a toast. A first load without a previous snapshot seeds the
-notification baseline rather than notifying for the existing backlog.
+System toast notifications show the sender and the first 120 characters of each
+new incoming reply in an **Open** conversation, with an ellipsis for longer
+messages. Clicking one opens that conversation in the widget. Replies are
+detected on refresh by message identity, including follow-ups that do not advance
+Intercom's `waiting_since` timestamp. Repeated fetches, cached history, your own
+replies, notes, and bot messages do not produce toasts. A first load establishes
+the baseline without notifying for the existing backlog; read state prevents
+duplicate notifications after restarting. Notifications use Omarchy's system
+notifier and respect its do-not-disturb settings.
 
 ### Attachments
 

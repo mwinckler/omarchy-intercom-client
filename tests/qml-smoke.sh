@@ -15,11 +15,13 @@ done
 # late unconfigured responses closing a composer during the timed dialog tests.
 install -m755 -- "$repo_root/tests/qml-smoke-fetch" "$smoke_root/plugin/intercom-fetch"
 install -m644 -- "$repo_root/tests/qml-smoke-picker" "$smoke_root/plugin/intercom-file-picker"
+mkdir -- "$smoke_root/bin"
+install -m755 -- "$repo_root/tests/qml-smoke-notifier" "$smoke_root/bin/omarchy-notification-send"
 ln -s -- /usr/share/omarchy/shell/Commons "$smoke_root/Commons"
 ln -s -- /usr/share/omarchy/shell/Ui "$smoke_root/Ui"
 
 set +e
-output=$(XDG_CONFIG_HOME="$smoke_root/config" INTERCOM_SMOKE_SLOW_CLOSED=1 timeout --kill-after=2s 8s quickshell --no-color -p "$smoke_root" 2>&1)
+output=$(PATH="$smoke_root/bin:$PATH" INTERCOM_SMOKE_NOTIFICATIONS="$smoke_root/notifications.jsonl" XDG_CONFIG_HOME="$smoke_root/config" INTERCOM_SMOKE_SLOW_CLOSED=1 timeout --kill-after=2s 8s quickshell --no-color -p "$smoke_root" 2>&1)
 status=$?
 set -e
 printf '%s\n' "$output"
@@ -28,3 +30,23 @@ if ((status != 0)); then
   exit "$status"
 fi
 grep -q 'intercom qml smoke passed' <<<"$output"
+PYTHONDONTWRITEBYTECODE=1 python3 - "$smoke_root/notifications.jsonl" <<'PY'
+import json
+import sys
+from collections import Counter
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    commands = [json.loads(line) for line in handle]
+toasts = [args for args in commands if "Toaster sender" in args]
+assert len(toasts) == 5, toasts
+assert Counter(args[args.index("--exec") - 1] for args in toasts) == Counter([
+    "First incoming reply " + "x" * 98 + "…",
+    "Another reply with the same waiting timestamp",
+    "Another teammate's reply",
+    "Reply discovered by the reader",
+    "Reply discovered by prefetch",
+]), toasts
+for args in toasts:
+    assert args[args.index("--exec") + 1:] == ["omarchy-shell", "omarchy-intercom-client", "conversation", "toast-smoke"], args
+print("QML system notification dispatch passed")
+PY

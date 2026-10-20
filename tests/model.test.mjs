@@ -653,15 +653,51 @@ assert.equal(model.newMessageConversations({}, [
   { id: "1", waitingSince: 10 },
   { id: "2", waitingSince: 20 }
 ]).map(function(row) { return row.id; }).join(","), "1,2");
-assert.equal(model.notificationsToSend({}, [
-  { id: "1", waitingSince: 10 },
-  { id: "2", waitingSince: 20 },
-  { id: "3", waitingSince: 30 },
-  { id: "4", waitingSince: 40 },
-  { id: "5", waitingSince: 50 },
-  { id: "6", waitingSince: 60 }
-], 3).map(function(row) { return row.id; }).join(","), "4,5,6");
-assert.equal(model.notificationLimit(), 5);
+// Toasts follow each incoming message, independently of waiting_since and the
+// locally focused/read state. History, duplicate fetches, and own sends stay quiet.
+const notificationThread = { id: "notify", state: "open", waitingSince: 100, from: "Stale sender", messages: [
+  { id: "known", createdAt: 200, from: "Customer", body: "Already seen" }
+] };
+const notificationReads = model.updateLocalReadState({}, notificationThread, true);
+const arrivingReplies = { ...notificationThread, messages: [
+  { id: "history", createdAt: 150, body: "Older history loaded later" },
+  ...notificationThread.messages,
+  { id: "reply", createdAt: 200, from: "Ada", body: "Please <b>help</b><br>with &lt;billing&gt; &amp; more" },
+  { id: "reply", createdAt: 200, from: "Ada", body: "Duplicated API part" },
+  { id: "second", createdAt: 201, email: "bo@example.com", body: "Another reply" },
+  { id: "mine", kind: "teammate", createdAt: 202, email: " ME@example.com ", body: "My reply" },
+  { id: "note", kind: "note", createdAt: 203, body: "Internal note" },
+  { id: "bot", kind: "bot", createdAt: 204, body: "Automated reply" },
+  { id: "other-admin", kind: "teammate", createdAt: 205, from: "Cy", email: "cy@example.com", body: "Teammate reply" }
+] };
+const replyNotifications = model.newReplyNotifications(notificationReads, arrivingReplies, "me@example.com", 100, notificationThread);
+assert.deepEqual(Array.from(replyNotifications, row => [row.from, row.snippet]), [
+  ["Ada", "Please help with <billing> & more"], ["bo@example.com", "Another reply"], ["Cy", "Teammate reply"]
+]);
+assert.ok(replyNotifications.every(row => row.id === "notify"));
+const afterReplies = model.updateLocalReadState(notificationReads, arrivingReplies, false, "me@example.com", 100);
+assert.equal(model.newReplyNotifications(afterReplies, arrivingReplies, "me@example.com", 100).length, 0);
+// Full thread/history loads cannot notify for an older part missing from the
+// preview, even if it was sent after the original startup baseline.
+assert.equal(model.newReplyNotifications(notificationReads, { ...notificationThread, messages: [
+  { id: "history", createdAt: 150, body: "Old, with no known part in this response" }
+] }, "", 100, notificationThread).length, 0);
+for (const state of ["closed", "snoozed", ""]) {
+  assert.equal(model.newReplyNotifications(notificationReads, { ...arrivingReplies, state }, "", 100).length, 0);
+}
+assert.equal(model.newReplyNotifications({}, { ...notificationThread, messages: [
+  { id: "old", createdAt: 99, body: "Startup backlog" }
+] }, "", 100).length, 0);
+assert.equal(model.newReplyNotifications({}, { ...notificationThread, messages: [
+  { id: "new", body: "Reply with no timestamp" }
+] }, "", 100)[0].snippet, "Reply with no timestamp");
+assert.equal(model.newReplyNotifications({}, { ...notificationThread, messages: Array.from({ length: 7 }, (_, i) => (
+  { id: String(i), createdAt: 200 + i, body: "Each reply gets a toast" }
+)) }, "", 100).length, 7);
+assert.equal(model.notificationMessageText({ body: "&#x1f44b; &#39;hello&#39; &#0;" }), "👋 'hello'");
+assert.equal(model.notificationMessageText({ body: "<p>First paragraph</p><p>Second paragraph</p>" }), "First paragraph Second paragraph");
+assert.equal(model.notificationMessageText({ blocks: [imageBlock] }), "Image: invoice.png");
+assert.equal(model.notificationMessageText({ blocks: [{ type: "attachment", url: "https://example.com/log", name: "log.txt" }] }), "Attachment: log.txt");
 assert.equal(model.notificationHeadline({ from: "Ada Lovelace", snippet: "Please help" }), "Ada Lovelace");
 assert.equal(model.notificationHeadline({ snippet: "Please help" }), "Intercom");
 assert.equal(model.notificationHeadline({ from: "-Ada" }), "–Ada");
@@ -669,10 +705,10 @@ assert.equal(model.notificationBody({ from: "Ada", snippet: "Please help with bi
 assert.equal(model.notificationBody({ title: "Billing", snippet: "" }), "Billing");
 assert.ok(model.notificationBody({ snippet: "x".repeat(200) }).endsWith("…"));
 assert.ok(model.notificationBody({ snippet: "x".repeat(200) }).length <= 120);
-assert.equal(model.shellQuote("1295"), "'1295'");
-assert.equal(model.shellQuote("a'b"), "'a'\\''b'");
-assert.equal(model.notificationExec({ id: "1295" }), "omarchy-shell omarchy-intercom-client conversation '1295'");
-assert.equal(model.notificationExec({}), "omarchy-shell omarchy-intercom-client open");
+assert.equal(model.notificationBody({ snippet: "<billing> & more" }), "&lt;billing&gt; &amp; more");
+assert.equal(model.truncateText("x".repeat(118) + "👋 trailing", 120), "x".repeat(118) + "…");
+assert.deepEqual(Array.from(model.notificationExec({ id: "1295" })), ["omarchy-shell", "omarchy-intercom-client", "conversation", "1295"]);
+assert.deepEqual(Array.from(model.notificationExec({})), ["omarchy-shell", "omarchy-intercom-client", "open"]);
 const notifyCmd = model.notificationCommand({
   id: "1295",
   from: "Ada",
@@ -680,9 +716,9 @@ const notifyCmd = model.notificationCommand({
 });
 assert.equal(notifyCmd[0], "omarchy-notification-send");
 assert.equal(notifyCmd[notifyCmd.indexOf("--app-name") + 1], "Intercom");
-assert.equal(notifyCmd[notifyCmd.indexOf("--exec") + 1], "omarchy-shell omarchy-intercom-client conversation '1295'");
-assert.equal(notifyCmd[notifyCmd.length - 2], "Ada");
-assert.equal(notifyCmd[notifyCmd.length - 1], "Please help");
+assert.equal(notifyCmd[notifyCmd.indexOf("--exec") - 2], "Ada");
+assert.equal(notifyCmd[notifyCmd.indexOf("--exec") - 1], "Please help");
+assert.deepEqual(Array.from(notifyCmd.slice(notifyCmd.indexOf("--exec") + 1)), ["omarchy-shell", "omarchy-intercom-client", "conversation", "1295"]);
 
 assert.equal(model.parseFetch(JSON.stringify({
   state: "ready",

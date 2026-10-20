@@ -6,6 +6,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd -- "$repo_root"
 
 node tests/model.test.mjs
+node tests/notification.test.mjs
 PYTHONDONTWRITEBYTECODE=1 python3 tests/fetch.test.py
 PYTHONDONTWRITEBYTECODE=1 python3 tests/file-picker.test.py
 omarchy plugin validate "$repo_root"
