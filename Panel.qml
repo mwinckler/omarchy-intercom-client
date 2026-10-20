@@ -149,9 +149,10 @@ Panel {
   readonly property bool localeMonthFirst: Model.dateFormatMonthFirst(Qt.locale().dateFormat(Locale.ShortFormat))
   readonly property bool scheduleOpen: scheduleDialog ? scheduleDialog.open : false
   property bool cancelConfirmOpen: false
+  property string pendingSpamId: ""
   property string pendingCancelScheduledId: ""
   property string pendingCancelLabel: ""
-  readonly property bool confirmOpen: root.cancelConfirmOpen
+  readonly property bool confirmOpen: root.cancelConfirmOpen || root.pendingSpamId !== ""
   readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen || root.fileDialogOpen
   onOverlayOpenChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
 
@@ -870,7 +871,7 @@ Panel {
   }
 
   function closeSelectedConversation() {
-    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.replying) return
+    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.markingSpam || intercom.replying) return
     var id = root.composerTargetId()
     if (!Model.isSafeConversationId(id)) return
     var list = root.searchOpen ? root.searchResults : inboxConversations
@@ -887,7 +888,7 @@ Panel {
   }
 
   function reopenSelectedConversation() {
-    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.replying) return
+    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.markingSpam || intercom.replying) return
     var id = root.composerTargetId()
     if (!Model.isSafeConversationId(id)) return
     pendingReopenId = id
@@ -917,6 +918,32 @@ Panel {
     root.searchCursorIndex = root.searchResults.length === 0
       ? 0
       : Math.max(0, Math.min(root.searchResults.length - 1, index))
+  }
+
+  function requestMarkAsSpam() {
+    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.markingSpam || intercom.replying) return
+    var id = root.composerTargetId()
+    if (!Model.isSafeConversationId(id)) return
+    root.closeScheduleDialog()
+    root.closeConfirmDialog()
+    pendingSpamId = id
+    confirmDialog.selectedIndex = 0
+  }
+
+  function commitConfirmation() {
+    if (pendingSpamId === "") {
+      root.commitCancelScheduled()
+      return
+    }
+    var id = pendingSpamId
+    root.closeConfirmDialog()
+    intercom.spamConversation(id)
+  }
+
+  function applySpamSender() {
+    root.searchResults = intercom.withoutSpam(root.searchResults)
+    if (intercom.blockedConversations[root.expandConversationId])
+      root.clearInboxSelection()
   }
 
   function applyClosedConversation(closedId) {
@@ -1320,6 +1347,7 @@ Panel {
   }
 
   function closeConfirmDialog() {
+    pendingSpamId = ""
     cancelConfirmOpen = false
     pendingCancelScheduledId = ""
     pendingCancelLabel = ""
@@ -1538,6 +1566,7 @@ Panel {
     onConversationReopened: function(conversationId) {
       root.applyReopenedConversation(conversationId)
     }
+    onSenderMarkedSpam: root.applySpamSender()
     onArchiveSearchHitsChanged: {
       if (!root.searchOpen) return
       if (root.searchRemote) {
@@ -1830,7 +1859,7 @@ Panel {
               if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
             })
           } else {
-            root.commitCancelScheduled()
+            root.commitConfirmation()
           }
           return
         }
@@ -1957,6 +1986,7 @@ Panel {
                   spacing: Style.space(8)
 
                   ProfileIndicator {
+                    id: settingsProfile
                     visible: header.signedIn
                     showInitials: !header.settingsActive
                     adminName: header.adminName
@@ -1971,12 +2001,12 @@ Panel {
                     onSignInRequested: root.signInWithIntercom()
                     onSettingsKey: function(event) { root.handleSettingsKey(event) }
                     Component.onCompleted: {
-                      header.signOutButton = signOutButton
-                      header.signInButton = signInButton
+                      header.signOutButton = settingsProfile.signOutButton
+                      header.signInButton = settingsProfile.signInButton
                     }
                     Component.onDestruction: {
-                      if (header.signOutButton === signOutButton) header.signOutButton = null
-                      if (header.signInButton === signInButton) header.signInButton = null
+                      if (header.signOutButton === settingsProfile.signOutButton) header.signOutButton = null
+                      if (header.signInButton === settingsProfile.signInButton) header.signInButton = null
                     }
                   }
 
@@ -2481,10 +2511,26 @@ Panel {
           wrapMode: Text.WordWrap
         }
 
+        Button {
+          id: markSpamButton
+          anchors.right: parent.right
+          anchors.bottom: expandedHint.top
+          anchors.bottomMargin: Style.space(8)
+          visible: !root.expandedContentLoading && !root.composing && root.composerTargetId() !== ""
+          text: intercom.markingSpam ? "Marking as spam…" : "Mark as spam"
+          enabled: !intercom.closing && !intercom.reopening && !intercom.markingSpam && !intercom.replying
+          bordered: true
+          foreground: root.urgent
+          accent: root.accent
+          fontFamily: root.fontFamily
+          fontSize: root.themeFont.caption
+          onClicked: root.requestMarkAsSpam()
+        }
+
         BorderSurface {
           visible: root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: expandedHint.top
+          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)
@@ -2506,7 +2552,7 @@ Panel {
           id: splitRow
           visible: !root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: expandedHint.top
+          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)
@@ -3113,13 +3159,15 @@ Panel {
     ConfirmDialog {
       id: confirmDialog
       anchors.fill: parent
-      opened: root.cancelConfirmOpen
+      opened: root.confirmOpen
       z: 40
-      message: root.pendingCancelLabel !== ""
+      message: root.pendingSpamId !== ""
+        ? "Mark this sender as spam? Intercom will block new messages and remove their existing conversations from the inbox. Local drafts and scheduled sends for known conversations will be discarded."
+        : root.pendingCancelLabel !== ""
         ? "Discard the message scheduled for " + root.pendingCancelLabel + "?"
         : "Discard this scheduled message?"
-      cancelText: "Keep"
-      confirmText: "Discard"
+      cancelText: root.pendingSpamId !== "" ? "Cancel" : "Keep"
+      confirmText: root.pendingSpamId !== "" ? "Mark as spam" : "Discard"
       background: root.popupColors.background
       foreground: root.foreground
       selectedText: root.accent
@@ -3130,7 +3178,7 @@ Panel {
           if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
         })
       }
-      onConfirmed: root.commitCancelScheduled()
+      onConfirmed: root.commitConfirmation()
     }
   }
 

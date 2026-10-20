@@ -15,6 +15,10 @@ assert.equal(Array.isArray(sequence), true);
 assert.equal(sequence[0], "Qt sequence element");
 
 const firstMessage = { id: "m1", kind: "customer", createdAt: 100, body: "Hello" };
+const senderThread = model.normalizeConversation({ id: "spam", senderId: "sender", messages: [firstMessage] });
+assert.equal(model.readCachedThread(model.writeCachedThread({}, senderThread, 100), "spam").conversation.senderId, "sender");
+assert.equal(model.parseDiskCache(model.serializeDiskCache({ state: "ready", threads: model.writeCachedThread({}, senderThread, 100) })).threads.spam.conversation.senderId, "sender");
+assert.deepEqual(Array.from(model.withoutSpam([senderThread, { id: "legacy" }, { id: "ok", senderId: "other" }], { sender: true }, { legacy: true }), row => row.id), ["ok"]);
 const secondMessage = { id: "m2", kind: "customer", createdAt: 100, body: "Follow-up" };
 const localThread = { id: "local", state: "open", waitingSince: 100, messages: [firstMessage] };
 let localReads = model.updateLocalReadState({}, localThread, false);

@@ -12,7 +12,7 @@ Intercom conversations without keeping the Intercom web app open.
 - Public replies and private notes as the signed-in teammate, with Markdown previews
 - Local drafts, scheduled sends, file uploads, attachment downloads, and image previews
 - Local cache/archive search, optional Intercom API search, and desktop notifications
-- Close and reopen conversations, or open them in your browser
+- Close and reopen conversations, mark senders as spam, or open threads in your browser
 
 **Waiting** means an open, non-snoozed conversation with a positive Intercom
 `waiting_since` value. It is not calculated by checking the last message's author.
@@ -62,6 +62,7 @@ On the app's Authentication page:
 2. Add redirect URL `http://localhost:18741/callback`.
 3. Grant **Read conversations**, **Write conversations**, and **Read admins**.
    Read admins is required for the profile indicator and to reply as yourself.
+   To use **Mark as spam**, also grant **Write users and companies** (contact write access).
 4. Copy the Client ID and Client secret.
 
 Do not put those values in `shell.json`. Open the widget, paste them on its
@@ -141,6 +142,13 @@ workspace ID cannot be inferred.
 Inbox filters fetch every API page; the 150-row API page size is not a display
 limit. Snoozed is a view filter; the plugin can close/reopen conversations but
 does not offer a snooze action.
+
+**Mark as spam** asks for confirmation, then blocks the conversation's sender
+using Intercom's contact-blocking API. This prevents new messages and archives
+their existing conversations in Intercom; it is not just a close or a local tag.
+Known conversations from that sender are removed from the reader/cache, and their
+local drafts and scheduled sends are discarded. An explicitly synced local archive
+is retained (it is not a live mirror of Intercom).
 
 ### Replies and drafts
 

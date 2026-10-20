@@ -102,7 +102,7 @@ function parseFetch(raw) {
 
 function normalizeConversation(value) {
   var conv = objectValue(value)
-  return {
+  var row = {
     id: textValue(conv.id),
     title: textValue(conv.title, "Conversation"),
     from: textValue(conv.from),
@@ -114,6 +114,20 @@ function normalizeConversation(value) {
     updatedAt: Math.max(0, Math.floor(numberValue(conv.updatedAt, 0))),
     messages: normalizeMessages(conv.messages)
   }
+  if (textValue(conv.senderId) !== "") row.senderId = textValue(conv.senderId)
+  return row
+}
+
+function conversationIsSpam(value, blockedSenders, blockedConversations) {
+  var row = objectValue(value)
+  return !!objectValue(blockedConversations)[textValue(row.id)]
+    || (textValue(row.senderId) !== "" && !!objectValue(blockedSenders)[textValue(row.senderId)])
+}
+
+function withoutSpam(conversations, blockedSenders, blockedConversations) {
+  return arrayValue(conversations).filter(function(row) {
+    return !conversationIsSpam(row, blockedSenders, blockedConversations)
+  })
 }
 
 function normalizeMessage(value) {

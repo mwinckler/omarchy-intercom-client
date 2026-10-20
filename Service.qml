@@ -30,6 +30,9 @@ Item {
   property string attachmentMessageConversationId: ""
   property bool closing: false
   property bool reopening: false
+  property bool markingSpam: false
+  property var blockedSenders: ({})
+  property var blockedConversations: ({})
   property string replyMessage: ""
   property var openConversations: []
   property int openCount: 0
@@ -98,6 +101,7 @@ Item {
   signal replySent(string conversationId)
   signal conversationClosed(string conversationId)
   signal conversationReopened(string conversationId)
+  signal senderMarkedSpam(string conversationId)
   signal newWaitingMessages(var conversations)
 
   readonly property string pluginRoot: resolvedPluginRoot()
@@ -112,7 +116,7 @@ Item {
   readonly property int refreshIntervalMs: intSetting("refreshIntervalSec", 60, 15, 3600) * 1000
   readonly property string tokenFile: String(setting("tokenFile", "")).trim()
   readonly property bool networkActive: loading || openLoading || messagesLoading
-    || prefetchProcess.running || replying || downloadingAttachment || closing || reopening
+    || prefetchProcess.running || replying || downloadingAttachment || closing || reopening || markingSpam
     || (searching && searchRemoteActive) || syncing
     || signingIn || signingOut || savingToken
 
@@ -229,6 +233,7 @@ Item {
     adminName = parsed.adminName
     adminEmail = parsed.adminEmail
     applyPrefs(parsed)
+    parsed.conversations = withoutSpam(parsed.conversations)
     conversations = parsed.conversations
     if (state === "ready" && waitingCount === 0)
       message = "No conversations are waiting for a reply."
@@ -442,7 +447,7 @@ Item {
   }
 
   function sendDueScheduled() {
-    if (!scheduledLoaded || replying || replyProcess.running) return
+    if (!scheduledLoaded || replying || replyProcess.running || markingSpam) return
     if (state === "unconfigured") return
     var due = Model.dueScheduled(scheduled, Date.now())
     if (due.length === 0) return
@@ -664,7 +669,7 @@ Item {
       ? parsed.inboxCount
       : (parsed.openCount > 0 ? parsed.openCount : parsed.conversations.length)
     var merged = Model.applyPendingInboxMoves(
-      parsed.conversations,
+      withoutSpam(parsed.conversations),
       source,
       pendingInboxMoves,
       Date.now()
@@ -704,7 +709,7 @@ Item {
   }
 
   function seedThreadCache(conversations) {
-    var list = conversations || []
+    var list = withoutSpam(conversations)
     var now = Date.now()
     var cache = threadCache
     var currentId = String(threadId || "")
@@ -759,6 +764,7 @@ Item {
 
   function loadThread(conversationId, force) {
     var id = String(conversationId || "").trim()
+    if (blockedConversations[id]) return
     var refresh = !!force
     if (id === "") {
       threadId = ""
@@ -832,6 +838,10 @@ Item {
     }
     applyIdentity(parsed)
     var failed = parsed.state === "error" || parsed.state === "unconfigured"
+    if (Model.conversationIsSpam({ id: fetchedId, senderId: conv.senderId }, blockedSenders, blockedConversations)) {
+      conv = {}
+      failed = true
+    }
     var convId = String(conv.id || "")
     if (!failed && convId !== "") {
       observeMessages(conv, false)
@@ -941,6 +951,10 @@ Item {
       parsed.message = stderr === "" ? "Could not load conversation." : stderr
     }
     var failed = parsed.state === "error" || parsed.state === "unconfigured"
+    if (Model.conversationIsSpam({ id: fetchedId, senderId: conv.senderId }, blockedSenders, blockedConversations)) {
+      conv = {}
+      failed = true
+    }
     var convId = String(conv.id || "")
     var existing = convId !== "" ? cachedThread(convId) : null
     var stale = Model.prefetchResultStale(existing, prefetchStartedAt)
@@ -1107,6 +1121,9 @@ Item {
     clearAttachmentMessage()
     closing = false
     reopening = false
+    markingSpam = false
+    blockedSenders = ({})
+    blockedConversations = ({})
     syncing = false
     searching = false
     searchMessage = ""
@@ -1210,9 +1227,69 @@ Item {
     changeConversationState(conversationId, "reopen")
   }
 
+  function spamConversation(conversationId) {
+    changeConversationState(conversationId, "spam")
+  }
+
+  function withoutSpam(rows) {
+    return Model.withoutSpam(rows, blockedSenders, blockedConversations)
+  }
+
+  function dropSpamSender(conversationId, senderId) {
+    var senders = Model.copyIdMap(blockedSenders)
+    senders[senderId] = true
+    blockedSenders = senders
+    var ids = Model.copyIdMap(blockedConversations)
+    ids[conversationId] = true
+    var rows = conversations.concat(openConversations, Model.inboxCacheConversations(inboxCache),
+      Model.cachedConversations(threadCache))
+    var known = {}
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      if (!Model.conversationIsSpam(row, senders, ids)) continue
+      ids[row.id] = true
+      if (known[row.id]) continue
+      known[row.id] = true
+      var previous = Model.conversationStateOf(row)
+      if (previous === "open") openCount = Math.max(0, openCount - 1)
+      else if (previous === "closed") closedCount = Math.max(0, closedCount - 1)
+      else if (previous === "snoozed") snoozedCount = Math.max(0, snoozedCount - 1)
+      allCount = Math.max(0, allCount - 1)
+      if (Model.findConversationById(conversations, row.id)) waitingCount = Math.max(0, waitingCount - 1)
+    }
+    blockedConversations = ids
+    conversations = withoutSpam(conversations)
+    openConversations = withoutSpam(openConversations)
+    var sources = ["open", "closed", "snoozed", "all"]
+    for (var s = 0; s < sources.length; s++) {
+      var snap = Model.readInboxCache(inboxCache, sources[s])
+      if (snap.fetchedAt > 0)
+        rememberInbox(sources[s], withoutSpam(snap.conversations), inboxCountForSource(sources[s]))
+    }
+    var cache = Model.copyIdMap(threadCache)
+    var reads = Model.copyIdMap(localReadState)
+    var moves = Model.copyIdMap(pendingInboxMoves)
+    for (var id in ids) {
+      delete cache[id]
+      delete reads[id]
+      delete moves[id]
+      discardDraft(id)
+    }
+    threadCache = cache
+    localReadState = reads
+    pendingInboxMoves = moves
+    pendingUrgent = Model.localUnreadConversations(reads)
+    refreshBarUrgent()
+    scheduled = scheduled.filter(function(item) { return !ids[item.conversationId] })
+    persistScheduled()
+    archiveSearchHits = withoutSpam(archiveSearchHits)
+    if (ids[threadId]) loadThread("")
+    schedulePersistCache()
+  }
+
   function changeConversationState(conversationId, action) {
     var id = String(conversationId || "").trim()
-    var kind = String(action || "") === "reopen" ? "reopen" : "close"
+    var kind = action === "spam" ? "spam" : (action === "reopen" ? "reopen" : "close")
     if (!Model.isSafeConversationId(id)) {
       message = "Select a conversation first."
       return
@@ -1220,13 +1297,14 @@ Item {
     if (closeProcess.running || replyProcess.running) return
     closing = kind === "close"
     reopening = kind === "reopen"
+    markingSpam = kind === "spam"
     _stateChangeId = id
     _stateChangeAction = kind
     _closeStdout = ""
     _closeStderr = ""
     closeProcess.command = withTokenFile([
       root.pluginRoot + "/intercom-fetch",
-      kind === "reopen" ? "--reopen" : "--close",
+      "--" + kind,
       id
     ])
     closeProcess.running = true
@@ -1361,7 +1439,7 @@ Item {
 
   function applyConversationPart(raw, exitCode) {
     var action = String(_stateChangeAction || "close")
-    var verb = action === "reopen" ? "reopen" : "close"
+    var verb = action === "spam" ? "mark as spam" : (action === "reopen" ? "reopen" : "close")
     var parsed = Model.parseFetch(raw)
     if (exitCode !== 0 && parsed.state === "error" && parsed.message === "Could not parse Intercom response.") {
       var stderr = String(_closeStderr || "").replace(/\s+/g, " ").trim()
@@ -1382,7 +1460,11 @@ Item {
       threadMessage = detail
       return
     }
-    if (action === "reopen") {
+    if (action === "spam") {
+      var response = JSON.parse(raw)
+      dropSpamSender(changedId, String(response.senderId || ""))
+      root.senderMarkedSpam(changedId)
+    } else if (action === "reopen") {
       markConversationOpen(changedId, parsed.conversation)
       root.conversationReopened(changedId)
     } else {
@@ -1450,13 +1532,13 @@ Item {
   }
 
   function localSearchHits(query) {
-    return Model.searchConversations([
+    return withoutSpam(Model.searchConversations([
       conversations,
       openConversations,
       Model.cachedConversations(threadCache),
       Model.inboxCacheConversations(inboxCache),
       Model.archiveIndexConversations(archiveIndex)
-    ], query, Model.searchLimit())
+    ], query, Model.searchLimit()))
   }
 
   function applyArchiveIndex(raw) {
@@ -1503,7 +1585,7 @@ Item {
       searchMessage = parsed.message !== "" ? parsed.message : "Could not search conversations."
       if (!searchRemoteActive) archiveSearchHits = []
     } else {
-      archiveSearchHits = parsed.conversations || []
+      archiveSearchHits = withoutSpam(parsed.conversations)
       searchMessage = parsed.message
     }
     if (searchQueued !== "") {
@@ -1801,6 +1883,7 @@ Item {
       closeWatchdog.stop()
       root.closing = false
       root.reopening = false
+      root.markingSpam = false
       var stdout = String(closeStdout.text || root._closeStdout || "")
       root.applyConversationPart(stdout, exitCode)
     }

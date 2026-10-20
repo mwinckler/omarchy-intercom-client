@@ -19,6 +19,61 @@ loader.exec_module(FETCH)
 
 
 class FetchTests(unittest.TestCase):
+    def test_spam_blocks_original_sender_not_latest_teammate(self):
+        conversation = {"id": "123", "source": {"author": {"type": "lead", "id": "customer"}},
+                        "conversation_parts": [{"author": {"type": "admin", "id": "teammate"}, "body": "Reply"}]}
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+            FETCH, "request_json", side_effect=[conversation, {"blocked": True}]
+        ) as request:
+            result = FETCH.spam_conversation(None, "123")
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["senderId"], "customer")
+        self.assertEqual(request.call_args.args[0], "https://api.intercom.io/contacts/customer/block")
+        self.assertEqual(request.call_args.kwargs["method"], "POST")
+        self.assertEqual(FETCH.normalize_thread(conversation, "US", "ws")["senderId"], "customer")
+        self.assertEqual(FETCH.parse_args(["--spam", "123"]).spam, "123")
+
+    def test_spam_refuses_ambiguous_or_unsafe_senders(self):
+        for conversation in ({"source": {"author": {"type": "admin", "id": "teammate"}}},
+                             {"contacts": {"contacts": [{"id": "one"}, {"id": "two"}]}},
+                             {"source": {"author": {"type": "lead", "id": "bad/id"}}}):
+            with self.subTest(conversation=conversation), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "request_json", return_value=conversation
+            ) as request:
+                result = FETCH.spam_conversation(None, "123")
+            self.assertEqual(result["state"], "error")
+            self.assertEqual(request.call_count, 1)
+        self.assertEqual(FETCH.conversation_sender_id({"contacts": {"contacts": [{"id": "single"}]}}), "single")
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(FETCH, "request_json") as request:
+            self.assertEqual(FETCH.spam_conversation(None, "bad/id")["state"], "error")
+            request.assert_not_called()
+        with patch.object(FETCH, "read_token", return_value=None):
+            self.assertEqual(FETCH.spam_conversation(None, "123")["state"], "unconfigured")
+
+    def test_spam_failure_never_retries_mutation_in_another_region(self):
+        conversation = {"source": {"author": {"type": "user", "id": "customer"}}}
+        for status in (403, 404, 500):
+            with self.subTest(status=status), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "request_json", side_effect=[conversation, FETCH.ApiError(status, "Failed")]
+            ) as request:
+                result = FETCH.spam_conversation(None, "123")
+            self.assertEqual(result["state"], "error")
+            self.assertEqual(request.call_count, 2)
+            if status == 403:
+                self.assertIn("Write users", result["message"])
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+            FETCH, "request_json", side_effect=[conversation, {}]
+        ):
+            self.assertEqual(FETCH.spam_conversation(None, "123")["state"], "error")
+
+    def test_spam_discovers_region_before_blocking(self):
+        wrong_region = FETCH.ApiError(401, '{"errors":[{"code":"unauthorized","message":"Access Token Invalid"}]}')
+        with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+            FETCH, "request_json", side_effect=[wrong_region, {"contacts": {"contacts": [{"id": "customer"}]}}, {"blocked": True}]
+        ) as request:
+            self.assertEqual(FETCH.spam_conversation(None, "123")["state"], "ready")
+        self.assertEqual(request.call_args.args[0], "https://api.eu.intercom.io/contacts/customer/block")
+
     def test_document_attachments_are_retained_searchable_and_deduplicated(self):
         attachment = {"url": "https://example.com/Invoice.PDF?signature=old", "content_type": "application/pdf", "filesize": 1234}
         body, blocks = FETCH.format_message_content("", [attachment, attachment, None, {"url": "file:///etc/passwd"}])

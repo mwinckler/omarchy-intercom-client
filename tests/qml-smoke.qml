@@ -137,6 +137,44 @@ ShellRoot {
     widget.openComposer()
   }
 
+  function probeSpam(service) {
+    var spam = { id: "spam", senderId: "sender", state: "open", messages: [{ id: "spam-message", body: "Spam" }] }
+    var otherSpam = { id: "other-spam", senderId: "sender", state: "closed" }
+    var keep = { id: "keep", senderId: "other", state: "open" }
+    service.openConversations = [spam, keep]
+    service.conversations = [spam]
+    service.threadCache = Model.writeCachedThread({}, spam, Date.now())
+    service.inboxCache = Model.writeInboxCache({}, "all", [spam, otherSpam, keep], 3, Date.now())
+    service.saveDraft("spam", "Discard me")
+    service.scheduled = Model.addScheduled([], "spam", "Do not send", false, Date.now() + 60000)
+    service.showThread(spam)
+    service.threadId = "spam"
+    widget.expandConversationId = "spam"
+    widget.requestMarkAsSpam()
+    if (!widget.confirmOpen || widget.pendingSpamId !== "spam") return false
+    widget.closeConfirmDialog()
+    if (widget.confirmOpen || service.markingSpam) return false
+    service.dropSpamSender("spam", "sender")
+    widget.applySpamSender()
+    if (service.openConversations.length !== 1 || service.openConversations[0].id !== "keep"
+        || service.threadCache.spam || service.conversations.length || service.threadId !== ""
+        || Model.hasDraft(service.drafts, "spam") || service.scheduled.length
+        || widget.expandConversationId !== "" || !service.blockedConversations["other-spam"]
+        || Model.readInboxCache(service.inboxCache, "all").conversations.length !== 1) return false
+    // In-flight responses must not resurrect a blocked sender's messages.
+    service._inboxRequested = "open"
+    service.applyInbox(JSON.stringify({ state: "ready", conversations: [spam, keep] }), 0)
+    service.loadingThreadId = "spam"
+    service.applyThread(JSON.stringify({ state: "ready", conversation: spam }), 0)
+    if (service.openConversations.length !== 1 || service.threadCache.spam) return false
+    service.clearSession()
+    service.state = "ready"
+    service.workspaceId = "smoke"
+    service.initialReadSeeded = true
+    service.inboxLoadedSource = "open"
+    return true
+  }
+
   function failDialogProbe(message) {
     attachmentDialogProbe.stop()
     console.error("intercom qml smoke failed:", message)
@@ -274,6 +312,10 @@ ShellRoot {
         console.error("intercom qml smoke failed: first inbox loading exposed previews or lost confirmed conversations")
         widget.close()
         Qt.quit()
+        return
+      }
+      if (!shell.probeSpam(service)) {
+        shell.failDialogProbe("spam confirmation or sender cleanup failed")
         return
       }
       service.state = "ready"

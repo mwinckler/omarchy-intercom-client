@@ -1188,6 +1188,28 @@ def conversation_identity(conv: dict) -> tuple[str, str, str]:
     return author_label(author), author_email_for_display(author), truncate(body) if body else ""
 
 
+def conversation_sender_id(conv: dict) -> str:
+    source = conv.get("source") if isinstance(conv.get("source"), dict) else {}
+    author = source.get("author") if isinstance(source.get("author"), dict) else {}
+    if author_type(author) in ("user", "lead", "contact", "visitor"):
+        contact_id = str(author.get("id") or "")
+        if CONVERSATION_ID.fullmatch(contact_id):
+            return contact_id
+    contacts = conv.get("contacts") if isinstance(conv.get("contacts"), dict) else {}
+    people = contacts.get("contacts")
+    # Never guess which customer to block in a multi-contact conversation.
+    if isinstance(people, list) and len(people) == 1 and isinstance(people[0], dict):
+        contact_id = str(people[0].get("id") or "")
+        if CONVERSATION_ID.fullmatch(contact_id):
+            return contact_id
+    return ""
+
+
+def sender_fields(conv: dict) -> dict:
+    sender_id = conversation_sender_id(conv)
+    return {"senderId": sender_id} if sender_id else {}
+
+
 def is_snoozed(conv: dict, now: int | None = None) -> bool:
     if str(conv.get("state") or "").strip().lower() == "snoozed":
         return True
@@ -1224,6 +1246,7 @@ def normalize_conversation(conv: dict, region: str, workspace_id: str) -> dict |
         "state": conversation_state(conv),
         "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
         "messages": extract_messages(conv),
+        **sender_fields(conv),
     }
 
 
@@ -1242,6 +1265,7 @@ def normalize_search_conversation(conv: dict, region: str, workspace_id: str) ->
         "waitingSince": waiting_since_of(conv),
         "updatedAt": unix_time(conv.get("updated_at")) or unix_time(conv.get("created_at")),
         "state": conversation_state(conv),
+        **sender_fields(conv),
     }
 
 
@@ -1254,6 +1278,7 @@ def normalize_thread(conv: dict, region: str, workspace_id: str) -> dict:
         "waitingSince": waiting_since_of(conv),
         "state": conversation_state(conv),
         "messages": extract_messages(conv),
+        **sender_fields(conv),
     }
 
 
@@ -2595,6 +2620,41 @@ def close_conversation(token_file: str | None, conversation_id: str) -> dict:
     return post_conversation_part(token_file, conversation_id, "close")
 
 
+def spam_conversation(token_file: str | None, conversation_id: str) -> dict:
+    token = read_token(token_file)
+    if not token:
+        return unconfigured_payload()
+    conv_id = str(conversation_id or "").strip()
+    if not CONVERSATION_ID.fullmatch(conv_id):
+        return result_payload("error", "Missing conversation id.")
+    config = load_config()
+    last_error = None
+    for region in region_order(config.get("region")):
+        base = api_base_for_region(region)
+        try:
+            conversation = request_json(f"{base}/conversations/{conv_id}", token)
+        except ApiError as error:
+            last_error = error
+            if is_wrong_region(error):
+                continue
+            return result_payload("error", str(error))
+        sender_id = conversation_sender_id(conversation)
+        if not sender_id:
+            return result_payload("error", "Could not identify a single sender to mark as spam. Open the conversation in Intercom.")
+        try:
+            # This blocks future messages AND archives the contact's conversations.
+            # Deleting a contact instead would allow the sender to create it again.
+            blocked = request_json(f"{base}/contacts/{sender_id}/block", token, method="POST")
+        except ApiError as error:
+            if is_missing_permission(error) or error.status == 403:
+                return result_payload("error", "Mark as spam requires Read conversations and Write users and companies permissions. Update the Intercom app and sign in again.")
+            return result_payload("error", str(error))
+        if blocked.get("blocked") is not True:
+            return result_payload("error", "Intercom did not confirm that the sender was blocked.")
+        return result_payload("ready", "Sender marked as spam.", senderId=sender_id)
+    return region_failure_payload(last_error)
+
+
 def reopen_conversation(token_file: str | None, conversation_id: str) -> dict:
     return post_conversation_part(token_file, conversation_id, "open")
 
@@ -3068,6 +3128,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Close a conversation id as the signed-in teammate",
     )
     parser.add_argument(
+        "--spam",
+        default="",
+        help="Block a conversation's sender and archive their existing conversations",
+    )
+    parser.add_argument(
         "--reopen",
         default="",
         help="Reopen a closed conversation id as the signed-in teammate",
@@ -3158,6 +3223,8 @@ def main(argv: list[str] | None = None) -> int:
             args.remote,
             max(1, min(SEARCH_LIMIT, args.limit)),
         )
+    elif str(args.spam or "").strip():
+        payload = spam_conversation(token_file, args.spam)
     elif str(args.reopen or "").strip():
         payload = reopen_conversation(token_file, args.reopen)
     elif str(args.close or "").strip():
