@@ -227,6 +227,38 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(request.call_args.kwargs["payload"]["pagination"]["starting_after"], "page-2")
         self.assertNotIn("starting_after", body["pagination"])
 
+    def test_historical_inbox_page_returns_without_fetching_history(self):
+        for mode in ("closed", "all"):
+            first = {"total_count": 100000, "conversations": [{"id": "1", "state": "closed"}],
+                     "pages": {"next": {"starting_after": "page-2"}}}
+            with self.subTest(mode=mode), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "search_first_region", return_value={"ok": True, "region": "US", "workspace": "ws", "payload": first}
+            ) as search, patch.object(FETCH, "request_json") as request, patch.object(FETCH, "attach_latest_messages") as details:
+                result = FETCH.fetch_inbox(None, mode, 150, page_only=True)
+            self.assertEqual(result["state"], "ready")
+            self.assertEqual(result["inboxCount"], 100000)
+            self.assertEqual(result["nextCursor"], "page-2")
+            self.assertEqual(len(result["conversations"]), 1)
+            self.assertNotIn("starting_after", search.call_args.args[1]["pagination"])
+            request.assert_not_called()
+            details.assert_not_called()
+
+    def test_inbox_page_continues_cursor_and_detects_repetition(self):
+        for cursor in ("", "page-2"):
+            response = {"conversations": [{"id": "2", "state": "closed"}],
+                        "pages": {"next": {"starting_after": cursor}} if cursor else {}}
+            with self.subTest(cursor=cursor), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "search_first_region", return_value={"ok": True, "region": "US", "workspace": "ws", "payload": response}
+            ) as search:
+                result = FETCH.fetch_inbox(None, "closed", 150, page_only=True, starting_after="page-2")
+            self.assertEqual(search.call_args.args[1]["pagination"]["starting_after"], "page-2")
+            self.assertEqual(result["state"], "error" if cursor else "ready")
+            if not cursor:
+                self.assertEqual(result["nextCursor"], "")
+        args = FETCH.parse_args(["--inbox", "closed", "--page", "--starting-after", "page-2"])
+        self.assertTrue(args.page)
+        self.assertEqual(args.starting_after, "page-2")
+
     def test_collect_search_pages_rejects_repeated_cursor(self):
         page = {"conversations": [{"id": "1"}], "pages": {"next": {"starting_after": "same"}}}
         with patch.object(FETCH, "request_json", return_value=page):

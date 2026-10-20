@@ -2080,6 +2080,8 @@ def fetch_inbox(
     token_file: str | None = None,
     inbox_filter: str = "open",
     limit: int = DEFAULT_LIMIT,
+    page_only: bool = False,
+    starting_after: str = "",
 ) -> dict:
     token = read_token(token_file)
     if not token:
@@ -2087,17 +2089,24 @@ def fetch_inbox(
     mode = filter_mode(inbox_filter)
     if mode == "waiting":
         mode = "open"
-    found = search_first_region(token, search_inbox_body(mode, limit))
+    body = search_inbox_body(mode, limit)
+    if starting_after:
+        body["pagination"]["starting_after"] = starting_after
+    found = search_first_region(token, body)
     if not found.get("ok"):
         return found
     payload = found.get("payload") if isinstance(found.get("payload"), dict) else {}
-    try:
-        payload = collect_search_pages(token, found["region"], search_inbox_body(mode, limit), payload)
-    except ApiError as error:
-        return result_payload("error", str(error))
+    if not page_only:
+        try:
+            payload = collect_search_pages(token, found["region"], body, payload)
+        except ApiError as error:
+            return result_payload("error", str(error))
+    next_cursor = search_next_cursor(payload)
+    if next_cursor and next_cursor == starting_after:
+        return result_payload("error", "Intercom repeated an inbox pagination cursor. Refresh to try again.")
     # Keep active inbox previews current, but don't fetch thousands of archived
     # bodies just to list Closed/All. Those full threads load on selection.
-    conversations = payload["conversations"]
+    conversations = payload.get("conversations") or []
     if mode in ("open", "snoozed"):
         payload["conversations"] = attach_latest_messages(token, found["region"], conversations)
     parsed = parse_inbox_search(payload, found["region"], found["workspace"], len(conversations), mode)
@@ -2108,6 +2117,7 @@ def fetch_inbox(
         waitingCount=parsed["waitingCount"],
         openCount=parsed["openCount"],
         inboxCount=parsed["inboxCount"],
+        nextCursor=next_cursor,
         inboxUrl=inbox_url(found["region"], found["workspace"]),
         workspaceId=found["workspace"],
         conversations=parsed["conversations"],
@@ -3161,7 +3171,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--limit",
         type=int,
         default=DEFAULT_LIMIT,
-        help="API page size (1-150); inbox and waiting lists fetch every page",
+        help="API page size (1-150); inbox lists fetch every page unless --page is used",
     )
     parser.add_argument(
         "--open",
@@ -3173,6 +3183,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="List conversations for a filter: open, waiting, closed, snoozed, all",
     )
+    parser.add_argument("--page", action="store_true", help="Return just one API page for --inbox")
+    parser.add_argument("--starting-after", default="", help="Continue --inbox --page from this pagination cursor")
     parser.add_argument(
         "--conversation",
         default="",
@@ -3249,7 +3261,7 @@ def main(argv: list[str] | None = None) -> int:
     elif str(args.conversation or "").strip():
         payload = fetch_thread(token_file, args.conversation)
     elif str(args.inbox or "").strip():
-        payload = fetch_inbox(token_file, args.inbox, max(1, min(150, args.limit)))
+        payload = fetch_inbox(token_file, args.inbox, max(1, min(150, args.limit)), args.page, args.starting_after)
     elif args.open:
         payload = fetch_open(token_file, max(1, min(150, args.limit)))
     else:

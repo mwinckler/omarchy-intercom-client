@@ -39,12 +39,14 @@ Item {
   property int closedCount: 0
   property int snoozedCount: 0
   property int allCount: 0
-  // Only a complete inbox snapshot can reveal the sidebar, not waiting previews.
+  // Only an inbox response can reveal the sidebar, not waiting previews.
   property string inboxLoadedSource: ""
   readonly property bool inboxLoaded: inboxLoadedSource === Model.inboxFetchFilter(inboxFilter)
   property bool openLoading: false
   property bool inboxQueued: false
   property string inboxQueuedSource: ""
+  property string inboxQueuedCursor: ""
+  property string inboxNextCursor: ""
   property string openMessage: ""
   property var messages: []
   property bool messagesLoading: false
@@ -155,14 +157,20 @@ Item {
     return withTokenFile([root.pluginRoot + "/intercom-fetch", "--limit", "150"])
   }
 
-  function inboxCommand(source) {
-    return withTokenFile([
+  function inboxCommand(source, cursor) {
+    var mode = Model.inboxFetchFilter(source || inboxFilter)
+    var command = [
       root.pluginRoot + "/intercom-fetch",
       "--inbox",
-      Model.inboxFetchFilter(source || inboxFilter),
+      mode,
       "--limit",
       "150"
-    ])
+    ]
+    // Historical views can contain years of conversations. Fetch them on demand,
+    // while active inboxes stay complete for unread reconciliation and counts.
+    if (mode === "closed" || mode === "all") command.push("--page")
+    if (String(cursor || "") !== "") command.push("--starting-after", String(cursor))
+    return withTokenFile(command)
   }
 
   function threadCommand(conversationId) {
@@ -464,8 +472,9 @@ Item {
     return openCount
   }
 
-  function rememberInbox(source, conversations, count) {
-    inboxCache = Model.writeInboxCache(inboxCache, source, conversations, count, Date.now())
+  function rememberInbox(source, conversations, count, nextCursor) {
+    var cursor = nextCursor !== undefined ? nextCursor : Model.readInboxCache(inboxCache, source).nextCursor
+    inboxCache = Model.writeInboxCache(inboxCache, source, conversations, count, Date.now(), cursor)
   }
 
   function showCachedInbox() {
@@ -481,6 +490,7 @@ Item {
     if (!snap || (snap.fetchedAt <= 0 && conversations.length === 0)) return false
     applyInboxCount(source, snap.count)
     openConversations = conversations
+    inboxNextCursor = snap.nextCursor
     if (source === "open" && openCount < conversations.length)
       openCount = conversations.length
     seedThreadCache(conversations)
@@ -617,34 +627,50 @@ Item {
     panelProcess.running = true
   }
 
-  function loadInbox(source) {
+  function loadMoreInbox() {
+    if (openLoading || inboxNextCursor === "") return
+    loadInbox(undefined, inboxNextCursor)
+  }
+
+  function loadInbox(source, cursor) {
     var wanted = source !== undefined && source !== null && String(source) !== ""
       ? Model.inboxFetchFilter(source)
       : Model.inboxFetchFilter(inboxFilter)
     var viewing = wanted === Model.inboxFetchFilter(inboxFilter)
+    var after = String(cursor || "")
+    if (inboxProcess.running && _inboxRequested === wanted && _inboxCursor === after) return
     if (viewing) {
-      if (!showCachedInbox() && !inboxLoaded)
+      if (!showCachedInbox() && !inboxLoaded) {
         openConversations = []
+        inboxNextCursor = ""
+      }
       openLoading = true
       openMessage = ""
     }
     if (inboxProcess.running) {
       inboxQueued = true
       inboxQueuedSource = wanted
+      inboxQueuedCursor = after
       return
     }
     inboxQueued = false
     inboxQueuedSource = ""
+    inboxQueuedCursor = ""
     _inboxRequested = wanted
+    _inboxCursor = after
+    _inboxTimedOut = false
     _inboxStdout = ""
     _inboxStderr = ""
-    inboxProcess.command = inboxCommand(wanted)
+    inboxProcess.command = inboxCommand(wanted, after)
     inboxProcess.running = true
     inboxWatchdog.restart()
   }
 
   function applyInbox(raw, exitCode) {
     var parsed = Model.parseFetch(raw)
+    if (_inboxTimedOut) {
+      parsed = Model.emptyFetch("error", "Loading conversations timed out. Press r to retry or choose another tab.")
+    }
     if (exitCode !== 0 && parsed.state === "error" && parsed.message === "Could not parse Intercom response.") {
       var stderr = String(_inboxStderr || "").replace(/\s+/g, " ").trim()
       parsed.message = stderr === "" ? "Could not load conversations." : stderr
@@ -668,8 +694,11 @@ Item {
     var count = parsed.inboxCount > 0
       ? parsed.inboxCount
       : (parsed.openCount > 0 ? parsed.openCount : parsed.conversations.length)
+    var previous = Model.readInboxCache(inboxCache, source)
+    var rows = _inboxCursor === "" ? parsed.conversations
+      : Model.mergeConversationPages(previous.conversations, parsed.conversations)
     var merged = Model.applyPendingInboxMoves(
-      withoutSpam(parsed.conversations),
+      withoutSpam(rows),
       source,
       pendingInboxMoves,
       Date.now()
@@ -679,7 +708,7 @@ Item {
         ? (parsed.openCount > 0 ? parsed.openCount : parsed.conversations.length)
         : count)
     }
-    rememberInbox(source, merged, inboxCountForSource(source))
+    rememberInbox(source, merged, inboxCountForSource(source), parsed.nextCursor)
     if (source === "open") {
       localReadState = Model.reconcileOpenReadState(localReadState, merged)
       pendingUrgent = Model.localUnreadConversations(localReadState)
@@ -697,6 +726,7 @@ Item {
     liveFetchApplied = true
     inboxLiveSource = source
     openConversations = merged
+    inboxNextCursor = parsed.nextCursor
     if (source === "open" && openCount < merged.length)
       openCount = merged.length
     openMessage = ""
@@ -1095,6 +1125,8 @@ Item {
     openLoading = false
     inboxQueued = false
     inboxQueuedSource = ""
+    inboxQueuedCursor = ""
+    inboxNextCursor = ""
     openMessage = ""
     messages = []
     messagesLoading = false
@@ -1407,14 +1439,14 @@ Item {
       var rows = source === target
         ? Model.prependConversation(snap.conversations, row)
         : Model.removeConversation(snap.conversations, id)
-      inboxCache = Model.writeInboxCache(inboxCache, source, rows, inboxCountForSource(source), source === target ? now : snap.fetchedAt)
+      inboxCache = Model.writeInboxCache(inboxCache, source, rows, inboxCountForSource(source), source === target ? now : snap.fetchedAt, snap.nextCursor)
     }
     var allSnap = Model.readInboxCache(inboxCache, "all")
     if (allSnap.fetchedAt > 0 || allSnap.conversations.length) {
       var allRows = Model.findConversationById(allSnap.conversations, id)
         ? Model.prependConversation(Model.setConversationState(allSnap.conversations, id, target), row)
         : Model.prependConversation(allSnap.conversations, row)
-      inboxCache = Model.writeInboxCache(inboxCache, "all", allRows, allCount, now)
+      inboxCache = Model.writeInboxCache(inboxCache, "all", allRows, allCount, now, allSnap.nextCursor)
     }
     pendingInboxMoves = Model.setPendingInboxMove(pendingInboxMoves, row, target, now)
   }
@@ -1624,6 +1656,8 @@ Item {
   property string _inboxStdout: ""
   property string _inboxStderr: ""
   property string _inboxRequested: "open"
+  property string _inboxCursor: ""
+  property bool _inboxTimedOut: false
   property string _threadStdout: ""
   property string _threadStderr: ""
   property string _prefetchStdout: ""
@@ -1894,6 +1928,7 @@ Item {
     interval: 120000
     repeat: false
     onTriggered: {
+      root._inboxTimedOut = true
       if (inboxProcess.running) inboxProcess.running = false
     }
   }
@@ -1918,9 +1953,11 @@ Item {
       root.applyInbox(stdout, exitCode)
       if (root.inboxQueued) {
         var next = root.inboxQueuedSource
+        var cursor = root.inboxQueuedCursor
         root.inboxQueued = false
         root.inboxQueuedSource = ""
-        Qt.callLater(function() { root.loadInbox(next) })
+        root.inboxQueuedCursor = ""
+        Qt.callLater(function() { root.loadInbox(next, cursor) })
       }
     }
   }

@@ -2644,6 +2644,19 @@ Panel {
                     }
                   }
                 }
+
+                Button {
+                  objectName: "loadMoreInboxButton"
+                  visible: !root.searchOpen && intercom.inboxNextCursor !== ""
+                  text: intercom.openLoading ? "Loading more…" : "Load more"
+                  enabled: !intercom.openLoading
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  fontSize: root.themeFont.caption
+                  onClicked: intercom.loadMoreInbox()
+                }
               }
             }
           }

@@ -175,6 +175,45 @@ ShellRoot {
     return true
   }
 
+  function probeInboxPagination(service) {
+    if (service.inboxCommand("closed").indexOf("--page") < 0
+        || service.inboxCommand("all").indexOf("--page") < 0
+        || service.inboxCommand("open").indexOf("--page") >= 0) return false
+    service.filterLoaded = false
+    service.applyLocalPrefs(JSON.stringify({ filter: "closed" }))
+    service._inboxRequested = "closed"
+    service._inboxCursor = ""
+    service._inboxTimedOut = false
+    service.applyInbox(JSON.stringify({ state: "ready", inboxCount: 100000, nextCursor: "page-2",
+      conversations: [{ id: "first", state: "closed" }] }), 0)
+    service.openLoading = false
+    if (!service.inboxLoaded || widget.expandedContentLoading || widget.inboxConversations.length !== 1
+        || service.closedCount !== 100000 || service.inboxNextCursor !== "page-2") return false
+    service._inboxCursor = "page-2"
+    service.applyInbox(JSON.stringify({ state: "error", message: "Page failed" }), 1)
+    if (widget.inboxConversations.length !== 1 || service.inboxNextCursor !== "page-2"
+        || service.openMessage !== "Page failed") return false
+    service.applyInbox(JSON.stringify({ state: "ready", inboxCount: 100000, nextCursor: "page-3",
+      conversations: [{ id: "first", state: "closed" }, { id: "second", state: "closed" }] }), 0)
+    if (widget.inboxConversations.length !== 2 || service.inboxNextCursor !== "page-3") return false
+    var snapshot = Model.parseDiskCache(Model.serializeDiskCache(service.cacheSnapshot()))
+    service.restoreDiskCache(snapshot)
+    if (service.inboxNextCursor !== "page-3" || widget.inboxConversations.length !== 2) return false
+    service._inboxTimedOut = true
+    service.applyInbox("", 15)
+    if (widget.expandedContentLoading || service.openMessage.indexOf("timed out") < 0
+        || widget.inboxConversations.length !== 2) return false
+    service._inboxTimedOut = false
+    service._inboxCursor = ""
+    service.inboxFilter = "open"
+    service.inboxLoadedSource = "open"
+    service.openConversations = []
+    service.openMessage = ""
+    service.inboxNextCursor = ""
+    service.initialReadSeeded = true
+    return true
+  }
+
   function failDialogProbe(message) {
     attachmentDialogProbe.stop()
     console.error("intercom qml smoke failed:", message)
@@ -316,6 +355,10 @@ ShellRoot {
       }
       if (!shell.probeSpam(service)) {
         shell.failDialogProbe("spam confirmation or sender cleanup failed")
+        return
+      }
+      if (!shell.probeInboxPagination(service)) {
+        shell.failDialogProbe("historical inbox pagination, restart, or timeout failed")
         return
       }
       service.state = "ready"

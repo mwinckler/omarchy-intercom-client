@@ -34,6 +34,7 @@ function emptyFetch(state, message) {
     waitingCount: 0,
     openCount: 0,
     inboxCount: 0,
+    nextCursor: "",
     closedCount: 0,
     snoozedCount: 0,
     allCount: 0,
@@ -83,6 +84,7 @@ function parseFetch(raw) {
     waitingCount: Math.max(0, Math.floor(numberValue(parsed.waitingCount, conversations.length))),
     openCount: Math.max(0, Math.floor(numberValue(parsed.openCount, conversations.length))),
     inboxCount: Math.max(0, Math.floor(numberValue(parsed.inboxCount, 0))),
+    nextCursor: textValue(parsed.nextCursor),
     closedCount: Math.max(0, Math.floor(numberValue(parsed.closedCount, 0))),
     snoozedCount: Math.max(0, Math.floor(numberValue(parsed.snoozedCount, 0))),
     allCount: Math.max(0, Math.floor(numberValue(parsed.allCount, 0))),
@@ -957,11 +959,12 @@ function readInboxCache(cache, source) {
   return {
     conversations: conversations,
     count: Math.max(0, Math.floor(numberValue(row.count, conversations.length))),
+    nextCursor: textValue(row.nextCursor),
     fetchedAt: Math.max(0, Math.floor(numberValue(row.fetchedAt, 0)))
   }
 }
 
-function writeInboxCache(cache, source, conversations, count, nowMs) {
+function writeInboxCache(cache, source, conversations, count, nowMs, nextCursor) {
   var next = {}
   var existing = objectValue(cache)
   for (var key in existing) {
@@ -972,9 +975,26 @@ function writeInboxCache(cache, source, conversations, count, nowMs) {
   next[inboxSourceKey(source)] = {
     conversations: rows,
     count: Math.max(0, Math.floor(numberValue(count, rows.length))),
+    nextCursor: textValue(nextCursor),
     fetchedAt: Math.max(0, Math.floor(numberValue(nowMs, Date.now())))
   }
   return next
+}
+
+function mergeConversationPages(previous, page) {
+  var rows = normalizeConversationList(previous)
+  var positions = {}
+  for (var i = 0; i < rows.length; i++) positions[rows[i].id] = i
+  var extra = normalizeConversationList(page)
+  for (var j = 0; j < extra.length; j++) {
+    var row = extra[j]
+    if (Object.prototype.hasOwnProperty.call(positions, row.id)) rows[positions[row.id]] = row
+    else {
+      positions[row.id] = rows.length
+      rows.push(row)
+    }
+  }
+  return rows
 }
 
 function parseInboxCache(value) {

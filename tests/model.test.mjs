@@ -16,6 +16,15 @@ assert.equal(sequence[0], "Qt sequence element");
 
 const firstMessage = { id: "m1", kind: "customer", createdAt: 100, body: "Hello" };
 const senderThread = model.normalizeConversation({ id: "spam", senderId: "sender", messages: [firstMessage] });
+const pagedInbox = model.writeInboxCache({}, "closed", [{ id: "one", state: "closed" }], 1000, 100, "next-page");
+const restoredPage = model.parseDiskCache(model.serializeDiskCache({ state: "ready", inboxes: pagedInbox })).inboxes.closed;
+assert.equal(restoredPage.nextCursor, "next-page");
+assert.equal(restoredPage.count, 1000);
+assert.equal(model.parseFetch('{"state":"ready","nextCursor":"next-page"}').nextCursor, "next-page");
+assert.equal(model.readInboxCache({}, "closed").nextCursor, "");
+const mergedPage = model.mergeConversationPages([{ id: "one" }, { id: "two", title: "old" }], [{ id: "two", title: "new" }, { id: "three" }]);
+assert.deepEqual(Array.from(mergedPage, row => row.id), ["one", "two", "three"]);
+assert.equal(mergedPage[1].title, "new");
 assert.equal(model.readCachedThread(model.writeCachedThread({}, senderThread, 100), "spam").conversation.senderId, "sender");
 assert.equal(model.parseDiskCache(model.serializeDiskCache({ state: "ready", threads: model.writeCachedThread({}, senderThread, 100) })).threads.spam.conversation.senderId, "sender");
 assert.deepEqual(Array.from(model.withoutSpam([senderThread, { id: "legacy" }, { id: "ok", senderId: "other" }], { sender: true }, { legacy: true }), row => row.id), ["ok"]);

@@ -139,8 +139,10 @@ switching workspace or monitor restores its keyboard focus instead of closing it
 Settings opens automatically when setup is missing, the main refresh fails, or the
 workspace ID cannot be inferred.
 
-Inbox filters fetch every API page; the 150-row API page size is not a display
-limit. Snoozed is a view filter; the plugin can close/reopen conversations but
+Open, Waiting, and Snoozed fetch every API page. Closed and All show the latest
+150 conversations first; **Load more** fetches the next page without hiding the
+current list. Tab counts still show the full API totals. Snoozed is a view filter;
+the plugin can close/reopen conversations but
 does not offer a snooze action.
 
 **Mark as spam** asks for confirmation, then blocks the conversation's sender
