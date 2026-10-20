@@ -897,7 +897,7 @@ ShellRoot {
       var service = shell.probeService
       var status = widget.spamStatus
       if (service.markingSpam || service.state !== "ready" || widget.settingsOpen || !status.visible || status.height <= 0
-          || status.children[0].text.indexOf("Write users and companies") < 0
+          || status.children[0].text.indexOf("requires the Read and write users permission") < 0
           || status.children[0].text.indexOf("sign in again") < 0
           || service.openConversations.length !== 1 || service.threadId !== "spam-denied"
           || !service.threadCache["spam-denied"] || service.messages.length !== 1
@@ -909,7 +909,7 @@ ShellRoot {
       }
       if (shell.spamPermissionStage++ === 0) {
         service.showThread(service.thread)
-        if (!status.visible || service.spamMessage.indexOf("Write users and companies") < 0) {
+        if (!status.visible || service.spamMessage.indexOf("requires the Read and write users permission") < 0) {
           shell.failDialogProbe("refreshing the thread cleared the spam permission error")
           stop()
           return

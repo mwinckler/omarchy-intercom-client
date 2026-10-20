@@ -62,7 +62,10 @@ On the app's Authentication page:
 2. Add redirect URL `http://localhost:18741/callback`.
 3. Grant **Read conversations**, **Write conversations**, and **Read admins**.
    Read admins is required for the profile indicator and to reply as yourself.
-   To use **Mark as spam**, also grant **Write users and companies** (contact write access).
+   To use **Mark as spam**, also grant **Read and write users**.
+   This is a separate scope from **Write users and companies**, which is not
+   sufficient for the contact-blocking endpoint. After adding the scope, sign in
+   again to authorize the updated permissions.
 4. Copy the Client ID and Client secret.
 
 Do not put those values in `shell.json`. Open the widget, paste them on its
@@ -157,10 +160,11 @@ their existing conversations in Intercom; it is not just a close or a local tag.
 Known conversations from that sender are removed from the reader/cache, and their
 local drafts and scheduled sends are discarded. An explicitly synced local archive
 is retained (it is not a live mirror of Intercom).
-If contact write access is missing, no local conversations, drafts, or scheduled
-sends are removed. A dismissible error above the bottom help line explains which
-permission to grant and asks you to sign in again; refreshing the thread does not
-hide the error.
+If contact-blocking access is missing, no local conversations, drafts, or scheduled
+sends are removed. A dismissible error above the bottom help line asks you to
+enable **Read and write users** and sign in again; refreshing the thread does not
+hide the error. Other API failures retain Intercom's explanation rather than
+being mislabeled as a missing permission.
 
 ### Replies and drafts
 

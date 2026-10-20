@@ -11,7 +11,7 @@ args = sys.argv[1:]
 if "--spam" in args:
     print(json.dumps({
         "state": "error",
-        "message": "Mark as spam requires the Write users and companies permission. Grant it on the Intercom app, then sign in again.",
+        "message": "Mark as spam requires the Read and write users permission, which is separate from Write users and companies. Enable Read and write users on the Intercom app, then sign in again.",
     }))
     sys.exit(0)
 if os.environ.get("INTERCOM_SMOKE_SLOW_CLOSED") and "--inbox" in args and args[args.index("--inbox") + 1] == "closed":

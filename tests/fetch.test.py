@@ -60,7 +60,8 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(result["state"], "error")
             self.assertEqual(request.call_count, 2)
             if status == 403:
-                self.assertIn("Write users", result["message"])
+                self.assertIn("403 Forbidden", result["message"])
+                self.assertNotIn("permission", result["message"])
         with patch.object(FETCH, "read_token", return_value="tok"), patch.object(
             FETCH, "request_json", side_effect=[conversation, {}]
         ):
@@ -74,11 +75,10 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(FETCH.spam_conversation(None, "123")["state"], "ready")
         self.assertEqual(request.call_args.args[0], "https://api.eu.intercom.io/contacts/customer/block")
 
-    def test_spam_missing_contact_write_permission_explains_how_to_reauthorize(self):
+    def test_spam_missing_block_scope_explains_the_correct_permission(self):
         conversation = {"id": "123", "source": {"author": {"type": "user", "id": "customer"}}}
         errors = [
-            FETCH.ApiError(403, "Forbidden"),
-            FETCH.ApiError(403, '{"errors":[{"code":"forbidden","message":"Insufficient permissions"}]}'),
+            FETCH.ApiError(403, '{"errors":[{"code":"token_unauthorized","message":"Not authorized to access resource"}]}'),
             FETCH.ApiError(401, '{"errors":[{"code":"token_unauthorized","message":"Not authorized to access resource"}]}'),
         ]
         for error in errors:
@@ -87,15 +87,16 @@ class FetchTests(unittest.TestCase):
             ) as request:
                 result = FETCH.spam_conversation(None, "123")
             self.assertEqual(result["state"], "error")
-            self.assertIn("Write users and companies", result["message"])
-            self.assertIn("Grant it on the Intercom app", result["message"])
+            self.assertIn("requires the Read and write users permission", result["message"])
+            self.assertIn("separate from Write users and companies", result["message"])
+            self.assertIn("Enable Read and write users on the Intercom app", result["message"])
             self.assertIn("sign in again", result["message"])
             self.assertNotIn("senderId", result)
             self.assertEqual(request.call_count, 2)
             self.assertEqual(request.call_args.args[0], "https://api.intercom.io/contacts/customer/block")
 
     def test_spam_missing_conversation_read_permission_does_not_attempt_to_block(self):
-        for error in (FETCH.ApiError(403, "Forbidden"), FETCH.ApiError(401, '{"errors":[{"code":"token_unauthorized"}]}')):
+        for error in (FETCH.ApiError(403, '{"errors":[{"code":"token_unauthorized"}]}'), FETCH.ApiError(401, '{"errors":[{"code":"token_unauthorized"}]}')):
             with self.subTest(status=error.status), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
                 FETCH, "request_json", side_effect=error
             ) as request:
@@ -104,6 +105,63 @@ class FetchTests(unittest.TestCase):
             self.assertIn("Read conversations", result["message"])
             self.assertEqual(request.call_count, 1)
             self.assertEqual(request.call_args.args[0], "https://api.intercom.io/conversations/123")
+
+    def test_spam_preserves_other_forbidden_errors_instead_of_guessing_a_scope(self):
+        conversation = {"id": "123", "source": {"author": {"type": "user", "id": "customer"}}}
+        forbidden = FETCH.ApiError(403, '{"errors":[{"code":"forbidden","message":"Workspace suspended"}]}')
+        for responses in ([forbidden], [conversation, forbidden]):
+            with self.subTest(stage=len(responses)), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "request_json", side_effect=responses
+            ) as request:
+                result = FETCH.spam_conversation(None, "123")
+            self.assertEqual(result["state"], "error")
+            self.assertEqual(result["message"], "Workspace suspended")
+            self.assertNotIn("senderId", result)
+            self.assertEqual(request.call_count, len(responses))
+
+    def test_spam_reauthorized_contact_management_token_passes_block_endpoint(self):
+        requests = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.respond(200, {"id": "123", "source": {"author": {"type": "lead", "id": "customer"}}})
+            def do_POST(self):
+                # Reproduce the live endpoint's distinct scope check: a token
+                # that can update contacts is not necessarily allowed to block.
+                if self.headers.get("Authorization") == "Bearer contact-update-only":
+                    self.respond(401, {"errors": [{"code": "token_unauthorized", "message": "Not authorized to access resource"}]})
+                else:
+                    self.respond(200, {"type": "contact", "id": "customer", "blocked": True})
+            def respond(self, status, payload):
+                requests.append((self.command, self.path, self.headers.get("Intercom-Version")))
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+            def log_message(self, *args):
+                pass
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with patch.object(FETCH, "api_base_for_region", return_value=f"http://127.0.0.1:{server.server_port}"), patch.object(
+                FETCH, "load_config", return_value={}
+            ), patch.object(FETCH, "read_token", return_value="contact-update-only") as token:
+                denied = FETCH.spam_conversation(None, "123")
+                self.assertEqual(denied["state"], "error")
+                self.assertIn("requires the Read and write users permission", denied["message"])
+                self.assertNotIn("senderId", denied)
+                token.return_value = "reauthorized-contact-management"
+                allowed = FETCH.spam_conversation(None, "123")
+                self.assertEqual(allowed["state"], "ready")
+                self.assertEqual(allowed["senderId"], "customer")
+            self.assertEqual(requests, [
+                ("GET", "/conversations/123", FETCH.INTERCOM_VERSION),
+                ("POST", "/contacts/customer/block", FETCH.INTERCOM_VERSION),
+            ] * 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
     def test_document_attachments_are_retained_searchable_and_deduplicated(self):
         attachment = {"url": "https://example.com/Invoice.PDF?signature=old", "content_type": "application/pdf", "filesize": 1234}

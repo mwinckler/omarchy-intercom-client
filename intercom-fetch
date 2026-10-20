@@ -1566,7 +1566,7 @@ def summarize_error(status: int, body: str) -> str:
     if status == 401:
         return "Intercom rejected the access token."
     if status == 403:
-        return "Intercom token is missing a required permission."
+        return "Intercom refused this request (403 Forbidden)."
     if status:
         return f"Intercom request failed ({status})."
     text = (body or "").strip()
@@ -1593,7 +1593,8 @@ def request_json(
         with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
+        with error:
+            body = error.read().decode("utf-8", errors="replace")
         raise ApiError(error.code, body, url) from None
     except urllib.error.URLError as error:
         raise ApiError(0, str(error.reason or error), url) from None
@@ -1988,6 +1989,15 @@ def missing_write_payload() -> dict:
         "error",
         "Write conversations is required to send a reply or close a conversation. "
         "Grant that scope on the Intercom app and sign in again.",
+    )
+
+
+def missing_spam_permission_payload() -> dict:
+    return result_payload(
+        "error",
+        "Mark as spam requires the Read and write users permission, "
+        "which is separate from Write users and companies. "
+        "Enable Read and write users on the Intercom app, then sign in again.",
     )
 
 
@@ -2645,7 +2655,7 @@ def spam_conversation(token_file: str | None, conversation_id: str) -> dict:
             conversation = request_json(f"{base}/conversations/{conv_id}", token)
         except ApiError as error:
             last_error = error
-            if is_missing_permission(error) or error.status == 403:
+            if is_missing_permission(error):
                 return missing_permission_payload()
             if is_wrong_region(error):
                 continue
@@ -2658,8 +2668,10 @@ def spam_conversation(token_file: str | None, conversation_id: str) -> dict:
             # Deleting a contact instead would allow the sender to create it again.
             blocked = request_json(f"{base}/contacts/{sender_id}/block", token, method="POST")
         except ApiError as error:
-            if is_missing_permission(error) or error.status == 403:
-                return result_payload("error", "Mark as spam requires the Write users and companies permission. Grant it on the Intercom app, then sign in again.")
+            if is_missing_permission(error):
+                # Blocking requires Read and write users; Write users and
+                # companies can authorize updates without allowing this endpoint.
+                return missing_spam_permission_payload()
             return result_payload("error", str(error))
         if blocked.get("blocked") is not True:
             return result_payload("error", "Intercom did not confirm that the sender was blocked.")
