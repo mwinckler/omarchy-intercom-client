@@ -40,6 +40,9 @@ Panel {
   property string pendingDownloadConversationId: ""
   readonly property bool attachmentStatusVisible: intercom.attachmentMessage !== ""
     && intercom.attachmentMessageConversationId === expandConversationId
+  readonly property bool spamStatusVisible: intercom.spamMessage !== ""
+    && intercom.spamMessageConversationId === root.composerTargetId()
+  readonly property Item spamStatus: spamStatusRow
   property string attachmentConversationId: ""
   readonly property FilePicker uploadDialog: uploadPicker
   readonly property FilePicker saveAttachmentDialog: savePicker
@@ -70,6 +73,7 @@ Panel {
     threadFocusKey = ""
     threadFocusIndex = -1
     intercom.clearAttachmentMessage()
+    intercom.clearSpamMessage()
     root.closeConfirmDialog()
     root.syncThreadFocus(pane === "thread")
   }
@@ -1473,6 +1477,7 @@ Panel {
     } else {
       compositorFocusLost = false
       intercom.clearAttachmentMessage()
+      intercom.clearSpamMessage()
       if (uploadDialog && uploadDialog.visible) uploadDialog.close()
       if (saveAttachmentDialog && saveAttachmentDialog.visible) saveAttachmentDialog.close()
       intercom.stopPrefetch()
@@ -2530,10 +2535,43 @@ Panel {
           onClicked: root.requestMarkAsSpam()
         }
 
+        // Keep action failures outside the scrollable thread, where a refresh
+        // cannot clear them and scrolling to the latest message cannot hide them.
+        Row {
+          id: spamStatusRow
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
+          anchors.bottomMargin: Style.space(8)
+          visible: root.spamStatusVisible && !root.expandedContentLoading
+          spacing: Style.space(8)
+
+          Text {
+            width: Math.max(0, parent.width - dismissSpamStatusButton.implicitWidth - parent.spacing)
+            text: intercom.spamMessage
+            textFormat: Text.PlainText
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: root.themeFont.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Button {
+            id: dismissSpamStatusButton
+            text: "Dismiss"
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: root.themeFont.caption
+            onClicked: intercom.clearSpamMessage()
+          }
+        }
+
         BorderSurface {
           visible: root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
+          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top
+            : (markSpamButton.visible ? markSpamButton.top : expandedHint.top)
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)
@@ -2555,7 +2593,8 @@ Panel {
           id: splitRow
           visible: !root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
+          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top
+            : (markSpamButton.visible ? markSpamButton.top : expandedHint.top)
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)

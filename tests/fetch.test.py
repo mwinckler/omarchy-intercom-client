@@ -74,6 +74,37 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(FETCH.spam_conversation(None, "123")["state"], "ready")
         self.assertEqual(request.call_args.args[0], "https://api.eu.intercom.io/contacts/customer/block")
 
+    def test_spam_missing_contact_write_permission_explains_how_to_reauthorize(self):
+        conversation = {"id": "123", "source": {"author": {"type": "user", "id": "customer"}}}
+        errors = [
+            FETCH.ApiError(403, "Forbidden"),
+            FETCH.ApiError(403, '{"errors":[{"code":"forbidden","message":"Insufficient permissions"}]}'),
+            FETCH.ApiError(401, '{"errors":[{"code":"token_unauthorized","message":"Not authorized to access resource"}]}'),
+        ]
+        for error in errors:
+            with self.subTest(status=error.status, body=error.body), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "request_json", side_effect=[conversation, error]
+            ) as request:
+                result = FETCH.spam_conversation(None, "123")
+            self.assertEqual(result["state"], "error")
+            self.assertIn("Write users and companies", result["message"])
+            self.assertIn("Grant it on the Intercom app", result["message"])
+            self.assertIn("sign in again", result["message"])
+            self.assertNotIn("senderId", result)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(request.call_args.args[0], "https://api.intercom.io/contacts/customer/block")
+
+    def test_spam_missing_conversation_read_permission_does_not_attempt_to_block(self):
+        for error in (FETCH.ApiError(403, "Forbidden"), FETCH.ApiError(401, '{"errors":[{"code":"token_unauthorized"}]}')):
+            with self.subTest(status=error.status), patch.object(FETCH, "read_token", return_value="tok"), patch.object(
+                FETCH, "request_json", side_effect=error
+            ) as request:
+                result = FETCH.spam_conversation(None, "123")
+            self.assertEqual(result["state"], "error")
+            self.assertIn("Read conversations", result["message"])
+            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_args.args[0], "https://api.intercom.io/conversations/123")
+
     def test_document_attachments_are_retained_searchable_and_deduplicated(self):
         attachment = {"url": "https://example.com/Invoice.PDF?signature=old", "content_type": "application/pdf", "filesize": 1234}
         body, blocks = FETCH.format_message_content("", [attachment, attachment, None, {"url": "file:///etc/passwd"}])

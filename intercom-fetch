@@ -2645,6 +2645,8 @@ def spam_conversation(token_file: str | None, conversation_id: str) -> dict:
             conversation = request_json(f"{base}/conversations/{conv_id}", token)
         except ApiError as error:
             last_error = error
+            if is_missing_permission(error) or error.status == 403:
+                return missing_permission_payload()
             if is_wrong_region(error):
                 continue
             return result_payload("error", str(error))
@@ -2657,7 +2659,7 @@ def spam_conversation(token_file: str | None, conversation_id: str) -> dict:
             blocked = request_json(f"{base}/contacts/{sender_id}/block", token, method="POST")
         except ApiError as error:
             if is_missing_permission(error) or error.status == 403:
-                return result_payload("error", "Mark as spam requires Read conversations and Write users and companies permissions. Update the Intercom app and sign in again.")
+                return result_payload("error", "Mark as spam requires the Write users and companies permission. Grant it on the Intercom app, then sign in again.")
             return result_payload("error", str(error))
         if blocked.get("blocked") is not True:
             return result_payload("error", "Intercom did not confirm that the sender was blocked.")

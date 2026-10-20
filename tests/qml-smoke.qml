@@ -12,6 +12,7 @@ ShellRoot {
   property list<url> selectedUploads: ["file:///home/test/screen%20shot.png", "file:///home/test/log.txt"]
   property int attachmentDialogStage: 0
   property int navigationStage: 0
+  property int spamPermissionStage: 0
 
   function probeInboxOnboarding(service) {
     service.clearSession()
@@ -214,6 +215,23 @@ ShellRoot {
     service.inboxNextCursor = ""
     service.initialReadSeeded = true
     return true
+  }
+
+  function beginSpamPermissionProbe() {
+    var service = shell.probeService
+    var conversation = { id: "spam-denied", senderId: "permission-sender", state: "open",
+      messages: [{ id: "retained-message", body: "Keep this message" }] }
+    service.openConversations = [conversation]
+    service.threadCache = Model.writeCachedThread({}, conversation, Date.now())
+    service.threadId = conversation.id
+    service.showThread(conversation)
+    service.messagesLoading = false
+    widget.expandConversationId = conversation.id
+    service.saveDraft(conversation.id, "Keep this draft")
+    service.scheduled = Model.addScheduled([], conversation.id, "Keep this schedule", false, Date.now() + 3600000)
+    widget.requestMarkAsSpam()
+    widget.commitConfirmation()
+    spamPermissionProbe.start()
   }
 
   function failDialogProbe(message) {
@@ -778,7 +796,63 @@ ShellRoot {
           shell.failDialogProbe("canceled Closed request delayed or replaced the selected tab")
           return
         }
+        shell.beginSpamPermissionProbe()
+      }
+    }
+  }
+
+  Timer {
+    id: spamPermissionProbe
+    interval: 200
+    repeat: true
+    onTriggered: {
+      var service = shell.probeService
+      var status = widget.spamStatus
+      if (service.markingSpam || service.state !== "ready" || widget.settingsOpen || !status.visible || status.height <= 0
+          || status.children[0].text.indexOf("Write users and companies") < 0
+          || status.children[0].text.indexOf("sign in again") < 0
+          || service.openConversations.length !== 1 || service.threadId !== "spam-denied"
+          || !service.threadCache["spam-denied"] || service.messages.length !== 1
+          || !Model.hasDraft(service.drafts, "spam-denied") || service.scheduled.length !== 1
+          || service.blockedSenders["permission-sender"] || service.blockedConversations["spam-denied"]) {
+        shell.failDialogProbe("missing spam permission was hidden, left the action busy, or removed local data")
+        stop()
+        return
+      }
+      if (shell.spamPermissionStage++ === 0) {
+        service.showThread(service.thread)
+        if (!status.visible || service.spamMessage.indexOf("Write users and companies") < 0) {
+          shell.failDialogProbe("refreshing the thread cleared the spam permission error")
+          stop()
+          return
+        }
+        status.children[1].clicked()
+        if (widget.spamStatusVisible || service.spamMessage !== "") {
+          shell.failDialogProbe("dismissing the spam permission error did not clear it")
+          stop()
+          return
+        }
+        widget.requestMarkAsSpam()
+        widget.commitConfirmation()
+      } else {
+        stop()
+        widget.expandConversationId = "other"
+        if (widget.spamStatusVisible || service.spamMessage !== "") {
+          shell.failDialogProbe("switching conversations retained the spam permission error")
+          return
+        }
+        service._stateChangeAction = "spam"
+        service._stateChangeId = "spam-denied"
+        service.applyConversationPart(JSON.stringify({ state: "error", message: "Late spam failure" }), 0)
+        if (widget.spamStatusVisible) {
+          shell.failDialogProbe("late spam failure was displayed in another conversation")
+          return
+        }
         widget.close()
+        if (service.spamMessage !== "") {
+          shell.failDialogProbe("closing the panel retained the spam permission error")
+          return
+        }
         console.log("intercom qml smoke passed", widget.width, widget.height)
         Qt.quit()
       }

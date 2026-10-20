@@ -153,6 +153,10 @@ their existing conversations in Intercom; it is not just a close or a local tag.
 Known conversations from that sender are removed from the reader/cache, and their
 local drafts and scheduled sends are discarded. An explicitly synced local archive
 is retained (it is not a live mirror of Intercom).
+If contact write access is missing, no local conversations, drafts, or scheduled
+sends are removed. A dismissible error beside **Mark as spam** explains which
+permission to grant and asks you to sign in again; refreshing the thread does not
+hide the error.
 
 ### Replies and drafts
 

@@ -31,6 +31,8 @@ Item {
   property bool closing: false
   property bool reopening: false
   property bool markingSpam: false
+  property string spamMessage: ""
+  property string spamMessageConversationId: ""
   property var blockedSenders: ({})
   property var blockedConversations: ({})
   property string replyMessage: ""
@@ -1174,6 +1176,7 @@ Item {
     closing = false
     reopening = false
     markingSpam = false
+    clearSpamMessage()
     blockedSenders = ({})
     blockedConversations = ({})
     syncing = false
@@ -1283,6 +1286,11 @@ Item {
     changeConversationState(conversationId, "spam")
   }
 
+  function clearSpamMessage() {
+    spamMessage = ""
+    spamMessageConversationId = ""
+  }
+
   function withoutSpam(rows) {
     return Model.withoutSpam(rows, blockedSenders, blockedConversations)
   }
@@ -1347,6 +1355,7 @@ Item {
       return
     }
     if (closeProcess.running || replyProcess.running) return
+    if (kind === "spam") clearSpamMessage()
     closing = kind === "close"
     reopening = kind === "reopen"
     markingSpam = kind === "spam"
@@ -1508,8 +1517,13 @@ Item {
     }
     if (parsed.state === "error") {
       var detail = parsed.message !== "" ? parsed.message : "Could not " + verb + " the conversation."
-      message = detail
-      threadMessage = detail
+      if (action === "spam") {
+        spamMessageConversationId = changedId
+        spamMessage = detail
+      } else {
+        message = detail
+        threadMessage = detail
+      }
       return
     }
     if (action === "spam") {
