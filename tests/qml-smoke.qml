@@ -270,6 +270,21 @@ ShellRoot {
     return false
   }
 
+  function composerHelpMatches() {
+    var content = widget.inboxNavigation.parent.parent
+    var hints = []
+    function collect(item) {
+      if (typeof item.text === "string" && item.text.indexOf("Ctrl+S later") >= 0) hints.push(item)
+      for (var child of item.children || []) collect(child)
+    }
+    collect(content)
+    if (hints.length !== 1 || hints[0].parent !== content || !hints[0].visible) return false
+    return ["Ctrl+󰌑 send now", "Ctrl+S later", "Ctrl+O attach", "Esc save draft",
+      "Ctrl+Shift+D discard", "Ctrl+N note"].every(function(option) {
+      return hints[0].text.indexOf(option) >= 0
+    })
+  }
+
   QtObject {
     id: fakeBar
     property color foreground: "#d8dee9"
@@ -478,6 +493,14 @@ ShellRoot {
         Qt.quit()
         return
       }
+      var draftHelpMatches = shell.composerHelpMatches()
+      widget.searchOpen = true
+      var searchHelpMatches = shell.composerHelpMatches()
+      widget.searchOpen = false
+      if (!draftHelpMatches || !searchHelpMatches) {
+        shell.failDialogProbe("draft shortcuts were duplicated or missing from the bottom help line")
+        return
+      }
       widget.stopComposing(true)
       service.drafts = Model.setDraft({}, draftConversationId, "", true, ["/home/test/log.txt"])
       widget.openComposer()
@@ -507,6 +530,10 @@ ShellRoot {
       if (!widget.composing || widget.replyAttachments.length !== 2 || service.scheduled.length !== 0) {
         console.error("intercom qml smoke failed: editing scheduled attachments")
         Qt.quit()
+        return
+      }
+      if (!shell.composerHelpMatches()) {
+        shell.failDialogProbe("scheduled reply shortcuts were duplicated or missing from the bottom help line")
         return
       }
       service.replySent("another-conversation")

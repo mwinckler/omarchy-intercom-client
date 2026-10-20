@@ -2495,12 +2495,12 @@ Panel {
             ? "Reopening conversation…"
             : (intercom.closing
             ? "Closing conversation…"
-            : (root.searchOpen
+            : (root.composing
+              ? "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Ctrl+O attach  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
+              : (root.searchOpen
               ? (root.pane === "thread"
                 ? "j/k messages  ·  h/l panes  ·  󰌑 reply or edit  ·  Esc close search"
                 : "↓/Tab results  ·  i/Ctrl+I Intercom  ·  j/k navigate  ·  󰌑 open  ·  h/l panes  ·  Esc close search")
-              : (root.composing
-              ? "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
               : (root.pane === "thread"
                 ? ((root.threadFocusKind === "draft" || root.threadFocusKind === "scheduled")
                   ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 edit  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close"
@@ -3155,17 +3155,6 @@ Panel {
                   fontSize: root.themeFont.caption
                   onClicked: root.discardComposerDraft()
                 }
-              }
-
-              Text {
-                width: parent.width
-                text: intercom.replying
-                  ? "Sending…"
-                  : "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Ctrl+O attach  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: root.themeFont.caption
-                wrapMode: Text.WordWrap
               }
             }
 
