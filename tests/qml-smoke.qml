@@ -11,6 +11,7 @@ ShellRoot {
   property var probeService: null
   property list<url> selectedUploads: ["file:///home/test/screen%20shot.png", "file:///home/test/log.txt"]
   property int attachmentDialogStage: 0
+  property int navigationStage: 0
 
   function probeInboxOnboarding(service) {
     service.clearSession()
@@ -45,7 +46,8 @@ ShellRoot {
     service.applyInbox(JSON.stringify({ state: "error", message: "Could not load conversations." }), 1)
     service.openLoading = false
     if (service.inboxLoaded || widget.expandedContentLoading || service.initialReadSeeded
-        || widget.inboxConversations.length !== 0 || service.openMessage === "") return false
+        || widget.inboxConversations.length !== 0 || service.openMessage === ""
+        || !widget.inboxNavigation.visible) return false
 
     service.openMessage = ""
     service.openLoading = true
@@ -725,6 +727,58 @@ ShellRoot {
           return
         }
         stop()
+        widget.open()
+        widget.closeComposer()
+        shell.probeService.inboxCache = Model.writeInboxCache({}, "open", [{ id: "navigation-open", state: "open" }], 1, Date.now())
+        shell.probeService.inboxLoadedSource = ""
+        shell.probeService.inboxLiveSource = ""
+        shell.probeService.pendingInboxMoves = ({})
+        shell.probeService.openMessage = ""
+        widget.inboxNavigation.children[2].activated()
+        navigationProbe.start()
+      }
+    }
+  }
+
+  Timer {
+    id: navigationProbe
+    interval: 200
+    repeat: true
+    onTriggered: {
+      var service = shell.probeService
+      var tabs = widget.inboxNavigation
+      if (!tabs.visible || tabs.height <= 0 || !tabs.enabled) {
+        shell.failDialogProbe("inbox navigation was hidden or disabled while loading")
+        stop()
+        return
+      }
+      if (shell.navigationStage++ === 0) {
+        if (!widget.expandedContentLoading || !service.openLoading || service._inboxRequested !== "closed") {
+          shell.failDialogProbe("slow Closed inbox did not enter the loading state: "
+            + [widget.expandedContentLoading, service.openLoading, service._inboxRequested,
+              service.inboxFilter, service.inboxLoaded, service.openConversations.length, service.inboxQueuedSource].join(", "))
+          stop()
+          return
+        }
+        tabs.children[0].activated()
+        if (service.inboxFilter !== "open" || widget.expandedContentLoading
+            || widget.inboxConversations.length !== 1 || widget.inboxConversations[0].id !== "navigation-open") {
+          shell.failDialogProbe("switching away from loading did not immediately restore the cached tab")
+          stop()
+          return
+        }
+        // Rapid tab changes must retain the latest request, not a stale queued one.
+        tabs.children[4].activated()
+        tabs.children[0].activated()
+      } else {
+        stop()
+        if (service.openLoading || service._inboxInFlight || !service.inboxLoaded || service.inboxFilter !== "open"
+            || service._inboxRequested !== "open" || service.openMessage !== ""
+            || Model.readInboxCache(service.inboxCache, "closed").conversations.length) {
+          shell.failDialogProbe("canceled Closed request delayed or replaced the selected tab")
+          return
+        }
+        widget.close()
         console.log("intercom qml smoke passed", widget.width, widget.height)
         Qt.quit()
       }

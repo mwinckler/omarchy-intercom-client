@@ -632,13 +632,26 @@ Item {
     loadInbox(undefined, inboxNextCursor)
   }
 
+  function pumpInboxQueue() {
+    if (!inboxQueued || _inboxInFlight) return
+    var source = inboxQueuedSource
+    var cursor = inboxQueuedCursor
+    inboxQueued = false
+    inboxQueuedSource = ""
+    inboxQueuedCursor = ""
+    loadInbox(source, cursor)
+  }
+
   function loadInbox(source, cursor) {
     var wanted = source !== undefined && source !== null && String(source) !== ""
       ? Model.inboxFetchFilter(source)
       : Model.inboxFetchFilter(inboxFilter)
     var viewing = wanted === Model.inboxFetchFilter(inboxFilter)
     var after = String(cursor || "")
-    if (inboxProcess.running && _inboxRequested === wanted && _inboxCursor === after) return
+    var inFlight = _inboxInFlight || inboxProcess.running
+    if (inFlight && !_inboxCancelled && _inboxRequested === wanted && _inboxCursor === after) return
+    // A background baseline refresh must not displace the user's queued tab.
+    if (!viewing && inboxQueued && inboxQueuedSource === Model.inboxFetchFilter(inboxFilter)) return
     if (viewing) {
       if (!showCachedInbox() && !inboxLoaded) {
         openConversations = []
@@ -647,10 +660,15 @@ Item {
       openLoading = true
       openMessage = ""
     }
-    if (inboxProcess.running) {
+    if (inFlight) {
       inboxQueued = true
       inboxQueuedSource = wanted
       inboxQueuedCursor = after
+      if (viewing && wanted !== _inboxRequested && !_inboxCancelled) {
+        _inboxCancelled = true
+        inboxWatchdog.stop()
+        inboxProcess.running = false
+      }
       return
     }
     inboxQueued = false
@@ -659,6 +677,8 @@ Item {
     _inboxRequested = wanted
     _inboxCursor = after
     _inboxTimedOut = false
+    _inboxCancelled = false
+    _inboxInFlight = true
     _inboxStdout = ""
     _inboxStderr = ""
     inboxProcess.command = inboxCommand(wanted, after)
@@ -1658,6 +1678,8 @@ Item {
   property string _inboxRequested: "open"
   property string _inboxCursor: ""
   property bool _inboxTimedOut: false
+  property bool _inboxCancelled: false
+  property bool _inboxInFlight: false
   property string _threadStdout: ""
   property string _threadStderr: ""
   property string _prefetchStdout: ""
@@ -1948,17 +1970,13 @@ Item {
     }
     onExited: function(exitCode) {
       inboxWatchdog.stop()
+      root._inboxInFlight = false
       root.openLoading = false
       var stdout = String(inboxStdout.text || root._inboxStdout || "")
-      root.applyInbox(stdout, exitCode)
-      if (root.inboxQueued) {
-        var next = root.inboxQueuedSource
-        var cursor = root.inboxQueuedCursor
-        root.inboxQueued = false
-        root.inboxQueuedSource = ""
-        root.inboxQueuedCursor = ""
-        Qt.callLater(function() { root.loadInbox(next, cursor) })
-      }
+      // A terminated helper can still flush a successful response on exit.
+      // Never let it replace the newly selected inbox or its error message.
+      if (!root._inboxCancelled) root.applyInbox(stdout, exitCode)
+      if (root.inboxQueued) Qt.callLater(root.pumpInboxQueue)
     }
   }
 

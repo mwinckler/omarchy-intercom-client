@@ -76,6 +76,7 @@ Panel {
   property bool scrollPendingSelection: false
   property bool pinViewedSelection: false
   property bool filterChordActive: false
+  readonly property Item inboxNavigation: inboxTabs
   readonly property var inboxRows: intercom.inboxLoaded ? Model.includeUnreadConversations(intercom.openConversations, [
     Model.inboxCacheConversations(intercom.inboxCache),
     intercom.conversations,
@@ -2389,9 +2390,11 @@ Panel {
           }
 
           Flow {
+            id: inboxTabs
             width: parent.width
             spacing: Style.space(8)
-            visible: !root.expandedAreaLoading && !root.searchOpen
+            // Navigation is independent of the inbox's loading/error state.
+            visible: !root.searchOpen
 
             FilterChip {
               label: "OPEN"

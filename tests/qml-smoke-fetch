@@ -2,9 +2,19 @@
 """Deterministic subprocess responses for the QML smoke test; never use the API."""
 
 import json
+import os
+import signal
 import sys
+import time
 
 args = sys.argv[1:]
+if os.environ.get("INTERCOM_SMOKE_SLOW_CLOSED") and "--inbox" in args and args[args.index("--inbox") + 1] == "closed":
+    def finish_cancelled(signum, frame):
+        # Simulate a late successful response while the old tab is being canceled.
+        print(json.dumps({"state": "ready", "workspaceId": "smoke", "conversations": [{"id": "stale-closed", "state": "closed"}]}))
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, finish_cancelled)
+    time.sleep(10)
 conversation = {}
 if "--conversation" in args:
     conversation = {

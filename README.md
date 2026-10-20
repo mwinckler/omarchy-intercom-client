@@ -144,6 +144,8 @@ Open, Waiting, and Snoozed fetch every API page. Closed and All show the latest
 current list. Tab counts still show the full API totals. Snoozed is a view filter;
 the plugin can close/reopen conversations but
 does not offer a snooze action.
+Filter tabs remain available while loading or after a failed request. Switching
+tabs cancels the previous inbox request rather than waiting for it to finish.
 
 **Mark as spam** asks for confirmation, then blocks the conversation's sender
 using Intercom's contact-blocking API. This prevents new messages and archives
