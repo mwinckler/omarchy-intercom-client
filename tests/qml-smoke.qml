@@ -153,10 +153,50 @@ ShellRoot {
     service.showThread(spam)
     service.threadId = "spam"
     widget.expandConversationId = "spam"
+    var shortcut = shell.spamShortcut()
+    var content = widget.inboxNavigation.parent.parent
+    var dialog = null
+    for (var child of content.parent.parent.children) {
+      if (typeof child.handleKey === "function" && typeof child.confirmText === "string") dialog = child
+    }
+    if (!shortcut || shortcut.sequence !== "Ctrl+Del" || shortcut.autoRepeat || !shortcut.enabled || !dialog) return false
+    for (var child of content.children) {
+      if (typeof child.text === "string" && child.text === "Mark as spam") return false
+    }
+    for (var pane of ["list", "thread"]) {
+      widget.pane = pane
+      if (shell.readerHelp().text.indexOf("Ctrl+Del spam") < 0) return false
+    }
+    shortcut.activated()
+    if (!widget.confirmOpen || widget.pendingSpamId !== "spam" || service.markingSpam
+        || dialog.selectedIndex !== 0 || shortcut.enabled) return false
+    // Repeating the shortcut must not confirm or reset an open dialog.
+    dialog.selectedIndex = 1
+    shortcut.activated()
+    if (dialog.selectedIndex !== 1 || service.markingSpam) return false
+    dialog.handleKey({ key: Qt.Key_Escape })
+    if (widget.confirmOpen || service.markingSpam || !shortcut.enabled) return false
+    shortcut.activated()
+    dialog.handleKey({ key: Qt.Key_Return })
+    if (widget.confirmOpen || service.markingSpam || service.scheduled.length !== 1
+        || !Model.hasDraft(service.drafts, "spam")) return false
+    // Busy requests and other dialogs must not start a destructive action.
+    for (var flag of ["closing", "reopening", "markingSpam", "replying"]) {
+      service[flag] = true
+      if (shortcut.enabled) return false
+      widget.requestMarkAsSpam()
+      if (widget.confirmOpen) return false
+      service[flag] = false
+    }
+    widget.cancelConfirmOpen = true
+    if (shortcut.enabled) return false
     widget.requestMarkAsSpam()
-    if (!widget.confirmOpen || widget.pendingSpamId !== "spam") return false
+    if (widget.pendingSpamId !== "") return false
     widget.closeConfirmDialog()
-    if (widget.confirmOpen || service.markingSpam) return false
+    widget.beginFilterChord()
+    shortcut.activated()
+    if (!widget.confirmOpen || widget.filterChordActive || dialog.selectedIndex !== 0) return false
+    dialog.handleKey({ key: Qt.Key_Escape })
     service.dropSpamSender("spam", "sender")
     widget.applySpamSender()
     if (service.openConversations.length !== 1 || service.openConversations[0].id !== "keep"
@@ -229,7 +269,11 @@ ShellRoot {
     widget.expandConversationId = conversation.id
     service.saveDraft(conversation.id, "Keep this draft")
     service.scheduled = Model.addScheduled([], conversation.id, "Keep this schedule", false, Date.now() + 3600000)
-    widget.requestMarkAsSpam()
+    shell.spamShortcut().activated()
+    if (!widget.confirmOpen || service.markingSpam) {
+      shell.failDialogProbe("spam shortcut did not require confirmation")
+      return
+    }
     widget.commitConfirmation()
     spamPermissionProbe.start()
   }
@@ -278,11 +322,28 @@ ShellRoot {
       for (var child of item.children || []) collect(child)
     }
     collect(content)
-    if (hints.length !== 1 || hints[0].parent !== content || !hints[0].visible) return false
+    if (hints.length !== 1 || hints[0].parent !== content || !hints[0].visible
+        || hints[0].text.indexOf("Ctrl+Del") >= 0 || shell.spamShortcut().enabled) return false
     return ["Ctrl+󰌑 send now", "Ctrl+S later", "Ctrl+O attach", "Esc save draft",
       "Ctrl+Shift+D discard", "Ctrl+N note"].every(function(option) {
       return hints[0].text.indexOf(option) >= 0
     })
+  }
+
+  function spamShortcut() {
+    var catcher = widget.inboxNavigation.parent.parent.parent
+    for (var child of catcher.data) {
+      if (child.objectName === "markSpamShortcut") return child
+    }
+    return null
+  }
+
+  function readerHelp() {
+    var content = widget.inboxNavigation.parent.parent
+    for (var child of content.children) {
+      if (typeof child.text === "string") return child
+    }
+    return null
   }
 
   QtObject {
@@ -859,7 +920,7 @@ ShellRoot {
           stop()
           return
         }
-        widget.requestMarkAsSpam()
+        shell.spamShortcut().activated()
         widget.commitConfirmation()
       } else {
         stop()

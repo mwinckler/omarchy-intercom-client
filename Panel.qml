@@ -160,6 +160,10 @@ Panel {
   readonly property bool confirmOpen: root.cancelConfirmOpen || root.pendingSpamId !== ""
   readonly property bool overlayOpen: root.scheduleOpen || root.confirmOpen || root.fileDialogOpen
   onOverlayOpenChanged: Qt.callLater(root.acknowledgeHighlightedConversation)
+  readonly property bool canMarkAsSpam: root.opened && !root.settingsOpen && !root.composing
+    && !root.overlayOpen && !root.expandedContentLoading && !root.searchFieldFocused
+    && !intercom.closing && !intercom.reopening && !intercom.markingSpam && !intercom.replying
+    && Model.isSafeConversationId(root.composerTargetId())
 
   function alpha(color, amount) { return Qt.rgba(color.r, color.g, color.b, amount) }
 
@@ -926,13 +930,14 @@ Panel {
   }
 
   function requestMarkAsSpam() {
-    if (settingsOpen || composing || intercom.closing || intercom.reopening || intercom.markingSpam || intercom.replying) return
+    if (!root.canMarkAsSpam) return
     var id = root.composerTargetId()
-    if (!Model.isSafeConversationId(id)) return
+    root.endFilterChord()
     root.closeScheduleDialog()
     root.closeConfirmDialog()
     pendingSpamId = id
     confirmDialog.selectedIndex = 0
+    keyCatcher.forceActiveFocus()
   }
 
   function commitConfirmation() {
@@ -1842,6 +1847,15 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+
+      Shortcut {
+        objectName: "markSpamShortcut"
+        sequence: "Ctrl+Del"
+        enabled: root.canMarkAsSpam
+        autoRepeat: false
+        onActivated: root.requestMarkAsSpam()
+      }
+
       onMoveRequested: function(dx, dy) {
         if (root.confirmOpen) {
           if (dx !== 0 || dy !== 0)
@@ -2491,7 +2505,9 @@ Panel {
           id: expandedHint
           anchors.bottom: parent.bottom
           width: parent.width
-          text: intercom.reopening
+          text: intercom.markingSpam
+            ? "Marking as spam…"
+            : intercom.reopening
             ? "Reopening conversation…"
             : (intercom.closing
             ? "Closing conversation…"
@@ -2499,40 +2515,24 @@ Panel {
               ? "Ctrl+󰌑 send now  ·  Ctrl+S later  ·  Ctrl+O attach  ·  Esc save draft  ·  Ctrl+Shift+D discard  ·  Ctrl+N note"
               : (root.searchOpen
               ? (root.pane === "thread"
-                ? "j/k messages  ·  h/l panes  ·  󰌑 reply or edit  ·  Esc close search"
-                : "↓/Tab results  ·  i/Ctrl+I Intercom  ·  j/k navigate  ·  󰌑 open  ·  h/l panes  ·  Esc close search")
+                ? "j/k messages  ·  h/l panes  ·  󰌑 reply or edit  ·  Ctrl+Del spam  ·  Esc close search"
+                : "↓/Tab results  ·  i/Ctrl+I Intercom  ·  j/k navigate  ·  󰌑 open  ·  h/l panes  ·  Ctrl+Del spam  ·  Esc close search")
               : (root.pane === "thread"
                 ? ((root.threadFocusKind === "draft" || root.threadFocusKind === "scheduled")
-                  ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 edit  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close"
+                  ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 edit  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close"
                   : (root.threadFocusKind === "draft-action" || root.threadFocusKind === "scheduled-action"
-                    ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close"
+                    ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close"
                     : (root.selectedHasDraft
-                      ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close"
-                      : "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close")))
+                      ? "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close"
+                      : "j/k messages  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close")))
                 : (root.selectedHasDraft
-                ? "j/k list  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 edit draft  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close"
-                : "j/k list  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  o open  ·  " + root.closeShortcutHint + "  ·  / search  ·  r refresh  ·  Esc close")))))
+                ? "j/k list  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 edit draft  ·  Ctrl+Shift+D discard  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close"
+                : "j/k list  ·  h/l panes  ·  f filter  ·  " + root.sizeShortcutHint + "  ·  󰌑 reply  ·  o open  ·  " + root.closeShortcutHint + "  ·  Ctrl+Del spam  ·  / search  ·  r refresh  ·  Esc close")))))
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: root.themeFont.caption
           horizontalAlignment: Text.AlignHCenter
           wrapMode: Text.WordWrap
-        }
-
-        Button {
-          id: markSpamButton
-          anchors.right: parent.right
-          anchors.bottom: expandedHint.top
-          anchors.bottomMargin: Style.space(8)
-          visible: !root.expandedContentLoading && !root.composing && root.composerTargetId() !== ""
-          text: intercom.markingSpam ? "Marking as spam…" : "Mark as spam"
-          enabled: !intercom.closing && !intercom.reopening && !intercom.markingSpam && !intercom.replying
-          bordered: true
-          foreground: root.urgent
-          accent: root.accent
-          fontFamily: root.fontFamily
-          fontSize: root.themeFont.caption
-          onClicked: root.requestMarkAsSpam()
         }
 
         // Keep action failures outside the scrollable thread, where a refresh
@@ -2541,7 +2541,7 @@ Panel {
           id: spamStatusRow
           anchors.left: parent.left
           anchors.right: parent.right
-          anchors.bottom: markSpamButton.visible ? markSpamButton.top : expandedHint.top
+          anchors.bottom: expandedHint.top
           anchors.bottomMargin: Style.space(8)
           visible: root.spamStatusVisible && !root.expandedContentLoading
           spacing: Style.space(8)
@@ -2570,8 +2570,7 @@ Panel {
         BorderSurface {
           visible: root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top
-            : (markSpamButton.visible ? markSpamButton.top : expandedHint.top)
+          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top : expandedHint.top
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)
@@ -2593,8 +2592,7 @@ Panel {
           id: splitRow
           visible: !root.expandedContentLoading
           anchors.top: expandedHeader.bottom
-          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top
-            : (markSpamButton.visible ? markSpamButton.top : expandedHint.top)
+          anchors.bottom: spamStatusRow.visible ? spamStatusRow.top : expandedHint.top
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.topMargin: Style.space(12)

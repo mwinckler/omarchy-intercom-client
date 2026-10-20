@@ -130,6 +130,7 @@ These Omarchy widget settings are separate from the in-panel sign-in page:
 | Activate the selected thread item | Enter (edit a draft/scheduled send, activate its action, or start a reply) |
 | Open the selected conversation in a browser | `o` |
 | Close the selected conversation, or reopen it if closed | `c` |
+| Mark the selected conversation's sender as spam | Ctrl+Del (asks for confirmation) |
 | Search | `/` |
 | Back/close | Esc (backs out of the current view or closes the panel; saves a draft when leaving the composer) |
 
@@ -147,14 +148,17 @@ does not offer a snooze action.
 Filter tabs remain available while loading or after a failed request. Switching
 tabs cancels the previous inbox request rather than waiting for it to finish.
 
-**Mark as spam** asks for confirmation, then blocks the conversation's sender
+Press **Ctrl+Del** in the reader to mark the selected conversation's sender as spam.
+The confirmation dialog defaults to **Cancel**; nothing changes until you confirm
+**Mark as spam**. The shortcut is inactive in text fields and while another dialog
+is open. Confirming blocks the conversation's sender
 using Intercom's contact-blocking API. This prevents new messages and archives
 their existing conversations in Intercom; it is not just a close or a local tag.
 Known conversations from that sender are removed from the reader/cache, and their
 local drafts and scheduled sends are discarded. An explicitly synced local archive
 is retained (it is not a live mirror of Intercom).
 If contact write access is missing, no local conversations, drafts, or scheduled
-sends are removed. A dismissible error beside **Mark as spam** explains which
+sends are removed. A dismissible error above the bottom help line explains which
 permission to grant and asks you to sign in again; refreshing the thread does not
 hide the error.
 
